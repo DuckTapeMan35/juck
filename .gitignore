@@ -1,0 +1,24 @@
+# zig
+.zig-cache/
+zig-out/
+zig-pkg/
+
+# build artifacts
+*.o
+*.obj
+*.a
+*.lib
+*.dll
+*.dylib
+*.exe
+*.so
+*.pdb
+
+# editor
+.vscode/
+.idea/
+
+# nix
+result
+result-*
+.direnv/
