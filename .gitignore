@@ -22,3 +22,10 @@ zig-pkg/
 result
 result-*
 .direnv/
+
+# tree-sitter
+node_modules/
+tree_sitter_juck/src/parser.c
+tree_sitter_juck/src/grammar.json
+tree_sitter_juck/src/node-types.json
+tree_sitter_juck/src/tree_sitter/
