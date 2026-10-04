@@ -41,7 +41,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
     });
 
-    const LexerImpl = enum { manual, re2c };
+    const LexerImpl = enum { manual, regex };
 
     const lexer_impl = b.option(LexerImpl, "lexer", "Lexer implementation to use (default: manual)") orelse .manual;
 
@@ -53,26 +53,74 @@ pub fn build(b: *std.Build) void {
     const options = b.addOptions();
     options.addOption(LexerImpl, "lexer", lexer_impl);
 
+    const ezi_gex = b.dependency("ezi_gex", .{ .target = target, .optimize = optimize });
+
     const lexer_mod = b.addModule("lexer", .{
         .root_source_file = b.path("src/lexer.zig"),
         .target = target,
         .imports = &.{
             .{ .name = "token", .module = token_mod },
             .{ .name = "build_options", .module = options.createModule() },
+            .{ .name = "ezi_gex", .module = ezi_gex.module("ezi_gex") },
         },
     });
 
-    if (lexer_impl == .re2c) {
-        const re2c = b.addSystemCommand(&.{ "re2c", "--lang", "zig", "-W" });
-        re2c.addFileArg(b.path("src/re2c_lexer.re"));
-        re2c.addArg("-o");
-        const re2c_mod = b.createModule(.{
-            .root_source_file = re2c.addOutputFileArg("re2c_lexer.zig"),
-            .target = target,
-            .imports = &.{.{ .name = "token", .module = token_mod }},
-        });
-        lexer_mod.addImport("re2c_lexer", re2c_mod);
-    }
+    const manual_lexer_mod = b.createModule(.{
+        .root_source_file = b.path("src/manual_lexer.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "token", .module = token_mod },
+        },
+    });
+    lexer_mod.addImport("manual_lexer", manual_lexer_mod);
+
+    const regex_lexer_mod = b.createModule(.{
+        .root_source_file = b.path("src/regex_lexer.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "token", .module = token_mod },
+            .{ .name = "ezi_gex", .module = ezi_gex.module("ezi_gex") },
+        },
+    });
+    lexer_mod.addImport("regex_lexer", regex_lexer_mod);
+
+    const ts_options = b.addOptions();
+    ts_options.addOption(bool, "enable_wasm", false);
+
+    const ts_mod = b.createModule(.{
+        .root_source_file = b.path("deps/zig-tree-sitter/src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    ts_mod.addOptions("build", ts_options);
+    ts_mod.addCSourceFile(.{ .file = b.path("deps/tree-sitter/lib/src/lib.c"), .flags = &.{"-std=c11"} });
+    ts_mod.addIncludePath(b.path("deps/tree-sitter/lib/include"));
+    ts_mod.addIncludePath(b.path("deps/tree-sitter/lib/src"));
+    ts_mod.addCMacro("_POSIX_C_SOURCE", "200112L");
+    ts_mod.addCMacro("_DEFAULT_SOURCE", "");
+    ts_mod.addCMacro("_BSD_SOURCE", "");
+    ts_mod.addCMacro("_DARWIN_C_SOURCE", "");
+
+    const ts_gen = b.addSystemCommand(&.{ "tree-sitter", "generate", "--js-runtime", "native" });
+    ts_gen.addFileArg(b.path("tree_sitter_juck/grammar.js"));
+    ts_gen.addArg("-o");
+    const ts_gen_dir = ts_gen.addOutputDirectoryArg("tree_sitter_juck");
+    ts_gen.setCwd(b.path("tree_sitter_juck"));
+    const reader_mod = b.createModule(.{
+        .root_source_file = b.path("src/ts_reader.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{.{ .name = "tree-sitter", .module = ts_mod }},
+    });
+    reader_mod.addCSourceFile(.{ .file = ts_gen_dir.path(b, "parser.c") });
+    reader_mod.addIncludePath(ts_gen_dir);
+    const printer_mod = b.createModule(.{
+        .root_source_file = b.path("src/printer.zig"),
+        .target = target,
+        .imports = &.{.{ .name = "reader", .module = reader_mod }},
+    });
 
     // Here we define an executable. An executable needs to have a root module
     // which needs to expose a `main` function. While we could add a main function
@@ -117,6 +165,8 @@ pub fn build(b: *std.Build) void {
     });
 
     exe.root_module.addImport("lexer", lexer_mod);
+    exe.root_module.addImport("reader", reader_mod);
+    exe.root_module.addImport("printer", printer_mod);
 
     // This declares intent for the executable to be installed into the
     // install prefix when running `zig build` (i.e. when executing the default
@@ -146,9 +196,7 @@ pub fn build(b: *std.Build) void {
 
     // This allows the user to pass arguments to the application in the build
     // command itself, like this: `zig build run -- arg1 arg2 etc`
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    run_cmd.addPassthruArgs();
 
     // Creates an executable that will run `test` blocks from the provided module.
     // Here `mod` needs to define a target, which is why earlier we made sure to
@@ -170,12 +218,29 @@ pub fn build(b: *std.Build) void {
     // A run step that will run the second test executable.
     const run_exe_tests = b.addRunArtifact(exe_tests);
 
+    const reader_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/reader_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "reader", .module = reader_mod },
+                .{ .name = "printer", .module = printer_mod },
+            },
+        }),
+    });
+    const run_reader_tests = b.addRunArtifact(reader_tests);
+    run_reader_tests.setCwd(b.path("."));
+
     // A top level step for running all tests. dependOn can be called multiple
     // times and since the two run steps do not depend on one another, this will
     // make the two of them run in parallel.
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
+    test_step.dependOn(&run_reader_tests.step);
+
+    b.getInstallStep().dependOn(&run_reader_tests.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //

@@ -1,4 +1,6 @@
-const Tag = union(enum) {
+const std = @import("std");
+
+pub const Tag = union(enum) {
     string: []const u8,
     int: []const u8,
     float: []const u8,
@@ -12,7 +14,7 @@ const Tag = union(enum) {
     colon,
 };
 
-const Token = struct {
+pub const Token = struct {
     tag: Tag,
     pos: usize,
 

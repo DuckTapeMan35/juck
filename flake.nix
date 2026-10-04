@@ -1,10 +1,17 @@
 {
-  description = "juck - JSON lexer/parser in Zig";
+  description = "juck - A LISP dialect with JSON syntax";
 
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    zls.url = "github:zigtools/zls";
+  };
 
   outputs =
-    { self, nixpkgs }:
+    {
+      self,
+      nixpkgs,
+      zls,
+    }:
     let
       systems = [
         "x86_64-linux"
@@ -12,17 +19,20 @@
         "x86_64-darwin"
         "aarch64-darwin"
       ];
-      forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
+      forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f system nixpkgs.legacyPackages.${system});
     in
     {
-      devShells = forAllSystems (pkgs: {
-        default = pkgs.mkShell {
-          packages = [
-            pkgs.zig_0_16
-            pkgs.zls_0_16
-            pkgs.re2c
-          ];
-        };
-      });
+      devShells = forAllSystems (
+        system: pkgs: {
+          default = pkgs.mkShell {
+            packages = [
+              pkgs.zig_0_17
+              zls.packages.${system}.zls
+              pkgs.tree-sitter
+              pkgs.nodejs
+            ];
+          };
+        }
+      );
     };
 }

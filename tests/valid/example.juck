@@ -1,0 +1,30 @@
+// example.juck: a small program in a Lisp with JSON syntax.
+// Each top-level value is a form; arrays are calls, the head is the operator.
+
+["def", "pi", 3.14159]
+["def", "avogadro", 6.022e23]
+["def", "tiny", -1.5E-10]
+
+/* Functions: ["defn", name, [params...], body] */
+["defn", "square", ["x"],
+  ["*", "x", "x"]]
+
+["defn", "fact", ["n"],
+  ["if", ["<=", "n", 1],
+    1,
+    ["*", "n", ["fact", ["-", "n", 1]]]]]
+
+// Objects as records / keyword arguments.
+["def", "config", {
+  "name": "juck",
+  "version": [0, 1, 0],
+  "debug": false,
+  "verbose": true,
+  "output": null,
+  "greeting": "hello, \"world\"\n\ttabbed \u00e9 \\ backslash"
+}]
+
+["let", {"a": 0, "b": -42, "empty": "", "nested": {"list": [], "obj": {}}},
+  ["print", "a", "b"]]
+
+["print", ["fact", 5], ["square", 12]]

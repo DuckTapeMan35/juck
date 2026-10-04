@@ -4,24 +4,29 @@ const Token = token.Token;
 const Tag = token.Tag;
 
 pub fn lex(str: *[]u8, alloc: std.mem.Allocator) ![]Token {
-    var tokens = std.ArrayListUnmanaged(Token){ .items = &.{}, .capacity = 0 };
+    var tokens: std.ArrayListUnmanaged(Token) = .empty;
     errdefer tokens.deinit(alloc);
     const og_len = str.*.len;
     while (str.*.len > 0) {
         const pos = og_len - str.*.len;
-        const json_str = lex_str(str) catch |err| {
+        const is_comment = skip_comment(str) catch {
+            std.debug.print("error at position {d}: comment is never closed, missing '*/'\n", .{pos});
+            return error.InvalidInput;
+        };
+        if (is_comment) continue;
+        const string = lex_str(str) catch |err| {
             switch (err) {
                 error.NoClosingQuote => std.debug.print("error at position {d}: string is never closed, missing '\"'\n", .{pos}),
                 error.NewlineInString => std.debug.print("error at position {d}: string contains a line break, use \\n instead\n", .{pos}),
             }
             return error.InvalidInput;
         };
-        if (json_str) |tag| {
+        if (string) |tag| {
             const t = Token.new(tag, pos);
             try tokens.append(alloc, t);
             continue;
         }
-        const json_n = lex_number(str) catch |err| {
+        const number = lex_number(str) catch |err| {
             switch (err) {
                 error.EmptyNumber => std.debug.print("error at position {d}: '-' must be followed by a digit\n", .{pos}),
                 error.LeadingDot => std.debug.print("error at position {d}: number cannot start with '.', write 0.5 instead of .5\n", .{pos}),
@@ -32,13 +37,13 @@ pub fn lex(str: *[]u8, alloc: std.mem.Allocator) ![]Token {
             }
             return error.InvalidInput;
         };
-        if (json_n) |tag| {
+        if (number) |tag| {
             const t = Token.new(tag, pos);
             try tokens.append(alloc, t);
             continue;
         }
-        const json_l = lex_literal(str);
-        if (json_l) |tag| {
+        const literal = lex_literal(str);
+        if (literal) |tag| {
             const t = Token.new(tag, pos);
             try tokens.append(alloc, t);
             continue;
@@ -150,4 +155,20 @@ fn lex_literal(str: *[]u8) ?Tag {
         return Tag{ .null = {} };
     }
     return null;
+}
+
+fn skip_comment(str: *[]u8) !bool {
+    if (str.*.len < 2 or str.*[0] != '/') return false;
+    switch (str.*[1]) {
+        '/' => {
+            const end = std.mem.indexOfScalar(u8, str.*, '\n') orelse str.*.len;
+            str.* = str.*[end..];
+        },
+        '*' => {
+            const end = std.mem.indexOf(u8, str.*[2..], "*/") orelse return error.UnclosedComment;
+            str.* = str.*[2 + end + 2 ..];
+        },
+        else => return false,
+    }
+    return true;
 }
