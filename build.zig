@@ -41,10 +41,38 @@ pub fn build(b: *std.Build) void {
         .target = target,
     });
 
+    const LexerImpl = enum { manual, re2c };
+
+    const lexer_impl = b.option(LexerImpl, "lexer", "Lexer implementation to use (default: manual)") orelse .manual;
+
+    const token_mod = b.createModule(.{
+        .root_source_file = b.path("src/token.zig"),
+        .target = target,
+    });
+
+    const options = b.addOptions();
+    options.addOption(LexerImpl, "lexer", lexer_impl);
+
     const lexer_mod = b.addModule("lexer", .{
         .root_source_file = b.path("src/lexer.zig"),
         .target = target,
+        .imports = &.{
+            .{ .name = "token", .module = token_mod },
+            .{ .name = "build_options", .module = options.createModule() },
+        },
     });
+
+    if (lexer_impl == .re2c) {
+        const re2c = b.addSystemCommand(&.{ "re2c", "--lang", "zig", "-W" });
+        re2c.addFileArg(b.path("src/re2c_lexer.re"));
+        re2c.addArg("-o");
+        const re2c_mod = b.createModule(.{
+            .root_source_file = re2c.addOutputFileArg("re2c_lexer.zig"),
+            .target = target,
+            .imports = &.{.{ .name = "token", .module = token_mod }},
+        });
+        lexer_mod.addImport("re2c_lexer", re2c_mod);
+    }
 
     // Here we define an executable. An executable needs to have a root module
     // which needs to expose a `main` function. While we could add a main function

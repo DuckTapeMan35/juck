@@ -17,7 +17,8 @@ fn mainImpl(init: std.process.Init) !void {
     const tokens = lexer.lex(&src, alloc) catch {
         return error.InvalidInput;
     };
-    std.debug.print("{any}", .{tokens});
+
+    for (tokens) |t| std.debug.print("{f}\n", .{t});
 }
 
 pub fn main(init: std.process.Init) !void {
