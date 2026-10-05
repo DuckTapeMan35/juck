@@ -93,7 +93,24 @@ version: 0.1
 
 ** Names
    A symbol may not contain `.` (see {* Constructing and accessing values})
-   or start with `@` (see {** Intrinsics}).
+   or start with `@` (see {** Intrinsics}), and can't be the name of a
+   special form.
+
+   Names can't shadow: a local name (a `let` binding or a parameter) can't
+   reuse the name of a built-in, a global defined anywhere in the program,
+   or another local that is still in scope. Scopes that don't overlap may
+   reuse a name.
+
+   @code d2
+   #color error red
+   #color ok green
+   direction: right
+   binding: "local name"
+   binding -> "builtin: error"
+   binding -> "global: error"
+   binding -> "local in scope: error"
+   binding -> "anything else: ok"
+   @end
 
 * Literal objects
   An object in expression position must have exactly one key, and the
@@ -132,10 +149,11 @@ version: 0.1
    Special forms are the forms that can't be functions: they bind names,
    define types, or control whether and when their arguments are
    evaluated. Their names are reserved and cannot be redefined:
-   `def`, `fn`, `lambda`, `type`, `if`, `let`, `do`, `data`.
+   `def`, `fn`, `lambda`, `type`, `if`, `let`, `do`, `data`, `template`,
+   `insert`, `splice`.
 
 *** def
-    Defines a global name.
+    Defines a global name. Only allowed at the top level.
 
     @code json
     ["def", {"name": "pi", "type": "f64"}, 3.14159]
@@ -144,7 +162,8 @@ version: 0.1
     The definition object has a `"name"` and a `"type"`, both required.
 
 *** fn
-    Defines a named function.
+    Defines a named function. Only allowed at the top level; for a local
+    function, bind a `lambda` with `let`.
 
     @code json
     ["fn", {"name": "add", "params": [["a", "i64"], ["b", "i64"]], "returns": "i64"},
@@ -231,6 +250,24 @@ version: 0.1
     distinct from strings: `["data", "a"]` holds the symbol `a`, while
     `["data", {"str": "a"}]` holds the string "a".
 
+*** template
+    Like `data`, but with holes that are filled in when the template is
+    evaluated.
+
+    @code json
+    ["template", ["+", ["insert", "x"], 1]]
+    @end
+
+    - `["insert", expr]` is replaced by the value of `expr`, which must
+      be `data`.
+    - `["splice", expr]`, as an element of an array, is replaced by the
+      elements of `expr`, which must be a `data` array.
+
+    If `x` holds `["*", 2, 3]`, the template above produces
+    `["+", ["*", 2, 3], 1]`. Everything else in the template is data, as
+    in `data`. `insert` and `splice` are only allowed inside a template,
+    and a hole belongs to the outermost template around it.
+
 ** Intrinsics
    Intrinsics are called exactly like functions, but the compiler
    handles them, usually because they must run at compile time. Their
@@ -243,6 +280,97 @@ version: 0.1
    values}) are also handled by the compiler, but keep their natural
    syntax.
 
+* Built-ins
+  Built-in functions are called like any function, but can't be used as
+  values and can't be redefined.
+
+** Arithmetic and comparison
+   - `+`, `-`, `*`, `/`: two numbers of the same type (`i64` or `f64`),
+     returning that type.
+   - `%`: two `i64`, returning `i64`.
+   - `<`, `<=`, `>`, `>=`: two numbers of the same type, returning `bool`.
+   - `=`, `!=`: two values of the same type (not functions), returning
+     `bool`.
+   - `not`: `bool` to `bool`.
+
+   `i64` arithmetic that overflows is a runtime error, and so is
+   dividing by zero. `/` truncates toward zero and the result of `%` has
+   the sign of the dividend, so `["/", -7, 2]` is `-3` and
+   `["%", -7, 3]` is `-1`.
+
+   `f64` arithmetic follows IEEE 754: dividing a non-zero number by zero
+   gives positive or negative infinity, and `0.0 / 0.0` gives NaN, which
+   is not equal to anything, including itself.
+
+** Output
+   - `["print", value]`: writes `value` followed by a newline, and
+     returns `null`. `value` must be a built-in type (`i64`, `f64`,
+     `bool`, `str`, `null`, `data`), or a struct that defines a `format`
+     function returning a built-in type.
+
+   Values are written as JSON: strings in quotes with escapes, data as
+   the JSON it is, and floats always with a `.` or an exponent, so they
+   read back as `f64`. Floating point division by `0` writes back `null`
+
+** Code as data
+   The built-ins for working with `data` are described in
+   {* Code as data}.
+
+* Code as data
+  A `data` value is code as written: the JSON value exactly, without
+  interpretation. Its kinds are null, bool, int, float, symbol (a JSON
+  string), array and object. A string literal in code is the object
+  `{"str": "..."}`, so code and data have exactly the same shape.
+
+  @code d2
+  direction: right
+  data: "data value"
+  value: "typed value"
+  data -> value: eval
+  value -> data: convert
+  @end
+
+** Inspecting
+   - `data-null?`, `data-bool?`, `data-int?`, `data-float?`,
+     `data-symbol?`, `data-array?`, `data-object?`: `data` to `bool`.
+   - `["data-len", d]`: the number of elements of an array, or of keys
+     of an object, as `i64`.
+   - `["data-get", d, i]`: element `i` of an array.
+   - `["data-slice", d, start, end]`: elements `start` up to (not
+     including) `end` of an array, as a new array.
+   - `["data-field", d, key]`: the value of a key (a `str`) of an object.
+   - `["data-has?", d, key]`: whether an object has a key.
+
+   Using one of these on the wrong kind of data, an index out of bounds,
+   or a key that doesn't exist, is a runtime error.
+
+** Converting
+   - `data-to-i64`, `data-to-f64`, `data-to-bool`: an int, float or bool
+     as a typed value. The kind must match exactly: an int is not
+     converted to `f64`.
+   - `data-to-str`: the name of a symbol, as a `str`.
+   - `["symbol", s]`: the symbol named by the `str` `s`.
+   - `["to-data", x]`: the code that evaluates to `x`. Numbers, booleans
+     and `null` become themselves, a `str` becomes `{"str": "..."}`, and
+     `data` becomes `["data", ...]`. Functions and non-finite floats have
+     no code that evaluates to them, so they are an error.
+
+** Building
+   - `["data-array", d, ...]`: an array of any number of `data` values.
+   - {*** template}: code with holes.
+
+** eval
+   `["eval", d]` analyzes, checks and runs `d` as an expression, and
+   returns its value as `data`: a `data` result as it is, any other
+   result converted with `to-data`.
+
+   - The evaluated code can use globals, but not the local names around
+     the `eval`.
+   - Only expressions can be evaluated, not `def` or `fn`.
+   - Errors in the evaluated code, including type errors, are runtime
+     errors of the `eval`.
+   - A function result is an error, since it has no `data` form.
+
 * Execution
   A program is evaluated like a Lisp: the top-level forms are evaluated
   in order, from first to last.
@@ -253,6 +381,12 @@ version: 0.1
   the file, including functions that call each other. Calling a
   function at the top level before its `fn` form has been evaluated is
   an error.
+
+  In the REPL, forms are entered one at a time and evaluated against
+  everything entered before. A name can be defined again, but only with
+  the same type; functions that use it see the new definition on their
+  next call. If a definition's value fails to evaluate, the name keeps
+  its previous meaning.
 
 * Constructing and accessing values
   A named type is called like a function to construct a value:
@@ -304,7 +438,8 @@ version: 0.1
    - `f64`: 64-bit float
    - `bool`
    - `str`: string
-   - `data`: any juck code as a value, in other words, any json type
+   - `data`: any juck code as a value, in other words, any JSON value;
+     see {* Code as data}
    - `null`: the type of `null`
 
    There are no implicit conversions: an operation mixing `i64` and
@@ -342,10 +477,14 @@ version: 0.1
    will make some of these optional later.
 
 * Open questions
-  - ( ) Other compound types: lists, maps.
+  - ( ) Other compound types: typed lists like `{"list": "i64"}`, and
+        maps. (`data` covers code as values; these are for ordinary
+        typed collections.)
   - ( ) Type inference, starting with `let` bindings.
-  - ( ) Macros: likely an intrinsic for defining them; when are they
-        expanded?
+  - ( ) Macros: how they're defined, when they're expanded (at analysis
+        time), which functions they can call at compile time, and
+        generated names (`gensym`) to avoid collisions under the
+        no-shadowing rule.
   - ( ) Modules: what `@import` returns, and how a module exposes
         names (probably as an object).
   - ( ) Methods: does `["point.scale", 2.0]` look up a field, or call
@@ -355,3 +494,5 @@ version: 0.1
         overloading later?
   - ( ) Plain function pointers without captures, for C interop and
         native code.
+  - ( ) Defining globals with `eval`, and how that relates to REPL
+        redefinition.
