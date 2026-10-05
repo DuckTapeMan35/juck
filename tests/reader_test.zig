@@ -18,13 +18,13 @@ test "valid files parse" {
         const src = try dir.readFileAlloc(io, entry.name, alloc, .limited(1 << 24));
 
         var diag: reader.Diagnostic = undefined;
-        const forms = reader.read(src, alloc, &diag) catch {
+        const program = reader.read(src, alloc, &diag) catch {
             std.debug.print("FAIL valid/{s}: syntax error at {d}:{d}\n", .{ entry.name, diag.line, diag.column });
             failures += 1;
             continue;
         };
         var json: std.Io.Writer.Allocating = .init(alloc);
-        try printer.writeJson(&json.writer, forms);
+        try printer.writeJson(&json.writer, program);
         _ = std.json.parseFromSliceLeaky(std.json.Value, alloc, json.written(), .{}) catch |err| {
             std.debug.print("FAIL valid/{s}: --json output is not valid JSON ({t})\n", .{ entry.name, err });
             failures += 1;
@@ -65,7 +65,7 @@ test "invalid files are rejected" {
     try std.testing.expectEqual(0, failures);
 }
 
-fn expectedError(src: []const u8) ?reader.Diagnostic {
+fn expectedError(src: []const u8) ?struct { line: u32, column: u32 } {
     const prefix = "// error: ";
     if (!std.mem.startsWith(u8, src, prefix)) return null;
     const line_end = std.mem.indexOfScalar(u8, src, '\n') orelse src.len;

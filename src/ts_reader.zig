@@ -21,10 +21,14 @@ pub const Value = struct {
 pub const Pair = struct { key: Value, value: Value };
 
 /// Where a syntax error was found, 1-based.
-pub const Diagnostic = struct { line: u32, column: u32 };
+pub const Diagnostic = struct {
+    line: u32,
+    column: u32,
+    message: []const u8,
+};
 
 /// Parses src into its top-level forms.
-pub fn read(src: []const u8, alloc: std.mem.Allocator, diag: ?*Diagnostic) ![]Value {
+pub fn read(src: []const u8, alloc: std.mem.Allocator, diag: ?*Diagnostic) !Value {
     const parser = ts.Parser.create();
     defer parser.destroy();
     try parser.setLanguage(tree_sitter_juck());
@@ -33,26 +37,28 @@ pub fn read(src: []const u8, alloc: std.mem.Allocator, diag: ?*Diagnostic) ![]Va
     defer tree.destroy();
     const root = tree.rootNode();
 
-    if (root.hasError()) {
-        const bad = firstError(root).?;
-        const p = bad.startPoint();
-        const d: Diagnostic = .{ .line = p.row + 1, .column = p.column + 1 };
-        if (diag) |out| {
-            out.* = d;
-        } else {
-            std.debug.print("syntax error at {d}:{d}\n", .{ d.line, d.column });
-        }
-        return error.InvalidInput;
-    }
+    if (root.hasError()) return fail(diag, firstError(root).?.startPoint(), "syntax error");
 
-    var forms: std.ArrayList(Value) = .empty;
-    errdefer forms.deinit(alloc);
+    // The grammar accepts any number of top-level values, so the error for
+    // an extra one can point at exactly where it starts.
+    var value: ?Value = null;
     var i: u32 = 0;
     while (root.namedChild(i)) |child| : (i += 1) {
         if (isComment(child)) continue;
-        try forms.append(alloc, try convert(child, src, alloc));
+        if (value != null) return fail(diag, child.startPoint(), "expected a single top-level value");
+        value = try convert(child, src, alloc);
     }
-    return forms.toOwnedSlice(alloc);
+    return value orelse return fail(diag, root.endPoint(), "expected a value, but the file is empty");
+}
+
+fn fail(diag: ?*Diagnostic, point: ts.Point, message: []const u8) error{InvalidInput} {
+    const d: Diagnostic = .{ .line = point.row + 1, .column = point.column + 1, .message = message };
+    if (diag) |out| {
+        out.* = d;
+    } else {
+        std.debug.print("error at {d}:{d}: {s}\n", .{ d.line, d.column, d.message });
+    }
+    return error.InvalidInput;
 }
 
 fn convert(node: ts.Node, src: []const u8, alloc: std.mem.Allocator) !Value {

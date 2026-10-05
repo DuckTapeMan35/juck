@@ -61,11 +61,11 @@ fn mainImpl(init: std.process.Init) !void {
         return;
     }
 
-    const forms = try reader.read(src, alloc, null);
+    const program = try reader.read(src, alloc, null);
     switch (mode) {
         .check, .tokens => {},
-        .ast => for (forms) |form| try printer.writeTree(out, form, 0),
-        .json => try printer.writeJson(out, forms),
+        .ast => try printer.writeTree(out, program, 0),
+        .json => try printer.writeJson(out, program),
     }
 }
 

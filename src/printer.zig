@@ -7,15 +7,12 @@ const Writer = std.Io.Writer;
 /// Version of the --json interchange format. Bump when its shape changes.
 pub const json_format_version = "0.1";
 
-/// Writes the forms as strict JSON: {"juck": VERSION, "forms": [...]}.
+/// Writes the program as strict JSON: {"juck": VERSION, "program": ...}.
 /// Comments and trailing commas are gone, so any JSON parser can read it.
-pub fn writeJson(w: *Writer, forms: []const Value) Writer.Error!void {
-    try w.print("{{\"juck\":\"{s}\",\"forms\":[", .{json_format_version});
-    for (forms, 0..) |form, i| {
-        if (i > 0) try w.writeByte(',');
-        try writeJsonValue(w, form);
-    }
-    try w.writeAll("]}\n");
+pub fn writeJson(w: *Writer, program: Value) Writer.Error!void {
+    try w.print("{{\"juck\":\"{s}\",\"program\":", .{json_format_version});
+    try writeJsonValue(w, program);
+    try w.writeAll("}\n");
 }
 
 fn writeJsonValue(w: *Writer, v: Value) Writer.Error!void {

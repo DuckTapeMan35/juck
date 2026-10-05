@@ -16,7 +16,8 @@ export default grammar({
   supertypes: $ => [$._value],
 
   rules: {
-    // A file is a sequence of top-level forms.
+    // A JSON document is exactly one value; the reader enforces that, so
+    // the grammar accepts several and lets the reader point at the extra one.
     document: $ => repeat($._value),
 
     _value: $ => choice(
