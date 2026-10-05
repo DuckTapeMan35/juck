@@ -195,7 +195,24 @@ pub const Session = struct {
                 try self.check_lambda(lambda.*);
                 return .{ .@"fn" = try self.fn_type_of(lambda.*) };
             },
+            .template => |t| {
+                try self.check_template(t.*);
+                return .data;
+            },
         };
+    }
+
+    /// Every hole in a template must be filled with data
+    fn check_template(self: *Session, t: ast.Template) Error!void {
+        switch (t) {
+            .literal => {},
+            .insert => |e| try self.expect(e, .data, "the inserted value", .{}),
+            .array => |a| for (a.parts) |part| switch (part) {
+                .one => |inner| try self.check_template(inner),
+                .splice => |e| try self.expect(e, .data, "the spliced value", .{}),
+            },
+            .object => |o| for (o.pairs) |pair| try self.check_template(pair.value),
+        }
     }
 
     fn type_of_body(self: *Session, body: []const ast.Expr) Error!Type {
@@ -278,12 +295,10 @@ pub const Session = struct {
     }
 
     fn check_builtin(self: *Session, pos: u32, b: Builtin, args: []const ast.Expr) Error!Type {
-        const arity: usize = switch (b) {
-            .not, .print => 1,
-            else => 2,
-        };
-        if (args.len != arity)
-            return self.fail(pos, "\"{s}\" takes {d} argument(s), but {d} were given", .{ b.name(), arity, args.len });
+        if (b.arity()) |arity| {
+            if (args.len != arity)
+                return self.fail(pos, "\"{s}\" takes {d} argument(s), but {d} were given", .{ b.name(), arity, args.len });
+        }
 
         switch (b) {
             .@"+", .@"-", .@"*", .@"/", .@"<", .@"<=", .@">", .@">=" => {
@@ -317,6 +332,72 @@ pub const Session = struct {
                     return self.fail(args[0].pos, "\"print\" can only print i64, f64, bool, str, null and data values, but this is {f}", .{t});
                 return .null;
             },
+
+            // data -> bool
+            .@"data-null?", .@"data-bool?", .@"data-int?", .@"data-float?", .@"data-symbol?", .@"data-array?", .@"data-object?" => {
+                try self.expect_args(b, args, &.{.data});
+                return .bool;
+            },
+            .@"data-len" => {
+                try self.expect_args(b, args, &.{.data});
+                return .i64;
+            },
+            .@"data-get" => {
+                try self.expect_args(b, args, &.{ .data, .i64 });
+                return .data;
+            },
+            .@"data-slice" => {
+                try self.expect_args(b, args, &.{ .data, .i64, .i64 });
+                return .data;
+            },
+            .@"data-field" => {
+                try self.expect_args(b, args, &.{ .data, .str });
+                return .data;
+            },
+            .@"data-has?" => {
+                try self.expect_args(b, args, &.{ .data, .str });
+                return .bool;
+            },
+            .@"data-to-i64" => {
+                try self.expect_args(b, args, &.{.data});
+                return .i64;
+            },
+            .@"data-to-f64" => {
+                try self.expect_args(b, args, &.{.data});
+                return .f64;
+            },
+            .@"data-to-bool" => {
+                try self.expect_args(b, args, &.{.data});
+                return .bool;
+            },
+            .@"data-to-str" => {
+                try self.expect_args(b, args, &.{.data});
+                return .str;
+            },
+            .@"to-data" => {
+                const t = try self.type_of(args[0]);
+                if (t == .@"fn") return self.fail(args[0].pos, "a function has no data form", .{});
+                return .data;
+            },
+            .symbol => {
+                try self.expect_args(b, args, &.{.str});
+                return .data;
+            },
+            .@"data-array" => {
+                for (args, 1..) |arg, n| try self.expect(arg, .data, "argument {d} of \"data-array\"", .{n});
+                return .data;
+            },
+            .eval => {
+                try self.expect_args(b, args, &.{.data});
+                return .data;
+            },
+        }
+    }
+
+    /// Checks a built-in's arguments against fixed types.
+    fn expect_args(self: *Session, b: Builtin, args: []const ast.Expr, types: []const Type) Error!void {
+        for (args, types, 1..) |arg, t, n| {
+            try self.expect(arg, t, "argument {d} of \"{s}\"", .{ n, b.name() });
         }
     }
 };

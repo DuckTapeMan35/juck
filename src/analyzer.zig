@@ -9,7 +9,7 @@ const Allocator = std.mem.Allocator;
 pub const Error = error{AnalysisFailed} || Allocator.Error;
 
 /// Names of special forms. They are reserved: they can't be used as names or as values
-pub const special_forms = [_][]const u8{ "def", "fn", "lambda", "type", "if", "let", "do", "data" };
+pub const special_forms = [_][]const u8{ "def", "fn", "lambda", "type", "if", "let", "do", "data", "template", "insert", "splice" };
 
 /// Analyzes a whole program. On an error, fills diag if given,
 /// otherwise prints it. All memory comes from alloc (meant to be an arena)
@@ -126,6 +126,14 @@ const Analyzer = struct {
                 if (items.len != 2) return self.fail(v.pos, "data takes exactly one argument", .{});
                 return .{ .data = items[1] };
             }
+            if (eql(head, "template")) {
+                if (items.len != 2) return self.fail(v.pos, "template takes exactly one argument", .{});
+                const t = try self.alloc.create(ast.Template);
+                t.* = try self.template(items[1]);
+                return .{ .template = t };
+            }
+            if (eql(head, "insert") or eql(head, "splice"))
+                return self.fail(v.pos, "{s} can only be used inside a template", .{head});
             if (eql(head, "def") or eql(head, "fn"))
                 return self.fail(v.pos, "{s} is only allowed at the top level", .{head});
             if (eql(head, "type"))
@@ -205,6 +213,50 @@ const Analyzer = struct {
             .returns = try self.type_expr(obj.get("returns").?),
             .body = try self.exprs(body),
         };
+    }
+
+    /// The body of a template: finds the insert and splice holes and
+    /// analyzes the expressions in them. Everything else stays data
+    fn template(self: *Analyzer, v: Value) Error!ast.Template {
+        if (form_head(v)) |head| {
+            if (eql(head, "insert")) {
+                if (v.data.array.len != 2) return self.fail(v.pos, "insert takes exactly one argument", .{});
+                return .{ .insert = try self.expr(v.data.array[1]) };
+            }
+            if (eql(head, "splice"))
+                return self.fail(v.pos, "splice can only be used as an element of an array", .{});
+        }
+        switch (v.data) {
+            .array => |items| {
+                const parts = try self.alloc.alloc(ast.TemplatePart, items.len);
+                var has_holes = false;
+                for (items, parts) |item, *part| {
+                    if (form_head(item)) |head| {
+                        if (eql(head, "splice")) {
+                            if (item.data.array.len != 2) return self.fail(item.pos, "splice takes exactly one argument", .{});
+                            part.* = .{ .splice = try self.expr(item.data.array[1]) };
+                            has_holes = true;
+                            continue;
+                        }
+                    }
+                    part.* = .{ .one = try self.template(item) };
+                    if (part.one != .literal) has_holes = true;
+                }
+                if (!has_holes) return .{ .literal = v };
+                return .{ .array = .{ .pos = v.pos, .parts = parts } };
+            },
+            .object => |pairs| {
+                const out = try self.alloc.alloc(ast.TemplatePair, pairs.len);
+                var has_holes = false;
+                for (pairs, out) |pair, *o| {
+                    o.* = .{ .key = pair.key, .value = try self.template(pair.value) };
+                    if (o.value != .literal) has_holes = true;
+                }
+                if (!has_holes) return .{ .literal = v };
+                return .{ .object = .{ .pos = v.pos, .pairs = out } };
+            },
+            else => return .{ .literal = v },
+        }
     }
 
     fn exprs(self: *Analyzer, values: []const Value) Error![]const ast.Expr {

@@ -1,0 +1,2 @@
+// error: 2:30
+[["data-array", ["data", 1], 2]]

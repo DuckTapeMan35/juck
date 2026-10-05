@@ -1,0 +1,2 @@
+// error: 2:14
+[["to-data", ["lambda", {"params": [], "returns": "i64"}, 1]]]

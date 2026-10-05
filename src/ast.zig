@@ -71,6 +71,8 @@ pub const Expr = struct {
         let: Let,
         do: []const Expr,
         lambda: *const Lambda,
+        /// ["template", x]: like data, with holes filled in at runtime.
+        template: *const Template,
     };
 };
 
@@ -99,6 +101,24 @@ pub const Binding = struct {
     type: Type,
     value: Expr,
 };
+
+/// The body of a template form: the code as written, except for holes.
+/// Subtrees without holes are kept as plain literal values
+pub const Template = union(enum) {
+    literal: reader.Value,
+    /// ["insert", expr]: the value of expr (which is data) goes here.
+    insert: Expr,
+    array: struct { pos: u32, parts: []const TemplatePart },
+    object: struct { pos: u32, pairs: []const TemplatePair },
+};
+
+pub const TemplatePart = union(enum) {
+    one: Template,
+    /// ["splice", expr]: the elements of expr (a data array) go here.
+    splice: Expr,
+};
+
+pub const TemplatePair = struct { key: reader.Value, value: Template };
 
 /// A lambda, and the function part of a named fn.
 pub const Lambda = struct {

@@ -193,6 +193,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "analyzer", .module = analyzer_mod },
             .{ .name = "printer", .module = printer_mod },
             .{ .name = "builtins", .module = builtins_mod },
+            .{ .name = "checker", .module = checker_mod },
         },
     });
 

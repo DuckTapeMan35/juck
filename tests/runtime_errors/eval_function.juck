@@ -1,0 +1,2 @@
+// error: 2:2
+[["eval", ["data", ["lambda", {"params": [], "returns": "i64"}, 1]]]]

@@ -4,6 +4,7 @@ const ast = @import("ast");
 const analyzer = @import("analyzer");
 const printer = @import("printer");
 const Builtin = @import("builtins").Builtin;
+const checker = @import("checker");
 
 const Allocator = std.mem.Allocator;
 const Diagnostic = reader.Diagnostic;
@@ -195,7 +196,36 @@ pub const Session = struct {
             },
             .do => |body| self.eval_body(body, env),
             .lambda => |lambda| self.closure(lambda, env),
+            .template => |t| .{ .data = try self.fill_template(t.*, env) },
         };
+    }
+
+    /// Builds the data a template describes, evaluating its holes.
+    fn fill_template(self: *Session, t: ast.Template, env: ?*const Env) Error!reader.Value {
+        switch (t) {
+            .literal => |v| return v,
+            .insert => |e| return (try self.eval(e, env)).data,
+            .array => |a| {
+                var items: std.ArrayList(reader.Value) = .empty;
+                for (a.parts) |part| switch (part) {
+                    .one => |inner| try items.append(self.alloc, try self.fill_template(inner, env)),
+                    .splice => |e| {
+                        const d = (try self.eval(e, env)).data;
+                        const spliced = switch (d.data) {
+                            .array => |xs| xs,
+                            else => return self.fail(e.pos, "splice needs an array, but this is {s}", .{kind_name(d)}),
+                        };
+                        try items.appendSlice(self.alloc, spliced);
+                    },
+                };
+                return .{ .pos = a.pos, .data = .{ .array = try items.toOwnedSlice(self.alloc) } };
+            },
+            .object => |o| {
+                const pairs = try self.alloc.alloc(reader.Pair, o.pairs.len);
+                for (o.pairs, pairs) |p, *out| out.* = .{ .key = p.key, .value = try self.fill_template(p.value, env) };
+                return .{ .pos = o.pos, .data = .{ .object = pairs } };
+            },
+        }
     }
 
     fn eval_body(self: *Session, body: []const ast.Expr, env: ?*const Env) Error!Value {
@@ -239,7 +269,13 @@ pub const Session = struct {
 
     // built-ins
     fn call_builtin(self: *Session, pos: u32, b: Builtin, args: []const ast.Expr, env: ?*const Env) Error!Value {
-        var vals: [2]Value = undefined;
+        if (b == .@"data-array") {
+            const items = try self.alloc.alloc(reader.Value, args.len);
+            for (args, items) |arg, *item| item.* = (try self.eval(arg, env)).data;
+            return .{ .data = .{ .pos = pos, .data = .{ .array = items } } };
+        }
+
+        var vals: [3]Value = undefined;
         for (args, 0..) |arg, i| vals[i] = try self.eval(arg, env);
 
         return switch (b) {
@@ -253,7 +289,169 @@ pub const Session = struct {
                 try self.out.writeByte('\n');
                 return .null;
             },
+
+            .@"data-null?" => .{ .bool = vals[0].data.data == .null },
+            .@"data-bool?" => .{ .bool = vals[0].data.data == .bool },
+            .@"data-int?" => .{ .bool = vals[0].data.data == .int },
+            .@"data-float?" => .{ .bool = vals[0].data.data == .float },
+            .@"data-symbol?" => .{ .bool = vals[0].data.data == .string },
+            .@"data-array?" => .{ .bool = vals[0].data.data == .array },
+            .@"data-object?" => .{ .bool = vals[0].data.data == .object },
+            .@"data-len" => switch (vals[0].data.data) {
+                .array => |xs| .{ .int = @intCast(xs.len) },
+                .object => |ps| .{ .int = @intCast(ps.len) },
+                else => self.fail(pos, "data-len needs an array or object, but this is {s}", .{kind_name(vals[0].data)}),
+            },
+            .@"data-get" => {
+                const xs = try self.expect_array(pos, vals[0].data);
+                const i = vals[1].int;
+                if (i < 0 or i >= xs.len)
+                    return self.fail(pos, "index {d} is out of bounds for an array of length {d}", .{ i, xs.len });
+                return .{ .data = xs[@intCast(i)] };
+            },
+            .@"data-slice" => {
+                const xs = try self.expect_array(pos, vals[0].data);
+                const start = vals[1].int;
+                const end = vals[2].int;
+                if (start < 0 or end < start or end > xs.len)
+                    return self.fail(pos, "slice {d}..{d} is out of bounds for an array of length {d}", .{ start, end, xs.len });
+                return .{ .data = .{ .pos = pos, .data = .{ .array = try self.alloc.dupe(reader.Value, xs[@intCast(start)..@intCast(end)]) } } };
+            },
+            .@"data-field" => {
+                const pairs = try self.expect_object(pos, vals[0].data);
+                if (try self.find_field(pairs, vals[1].str)) |v| return .{ .data = v };
+                return self.fail(pos, "the object has no key \"{s}\"", .{vals[1].str});
+            },
+            .@"data-has?" => {
+                const pairs = try self.expect_object(pos, vals[0].data);
+                return .{ .bool = try self.find_field(pairs, vals[1].str) != null };
+            },
+
+            .@"data-to-i64" => switch (vals[0].data.data) {
+                .int => |text| .{ .int = std.fmt.parseInt(i64, text, 10) catch
+                    return self.fail(pos, "{s} does not fit in i64", .{text}) },
+                else => self.fail(pos, "data-to-i64 needs an int, but this is {s}", .{kind_name(vals[0].data)}),
+            },
+            .@"data-to-f64" => switch (vals[0].data.data) {
+                .float => |text| .{ .float = std.fmt.parseFloat(f64, text) catch unreachable },
+                else => self.fail(pos, "data-to-f64 needs a float, but this is {s}", .{kind_name(vals[0].data)}),
+            },
+            .@"data-to-bool" => switch (vals[0].data.data) {
+                .bool => |x| .{ .bool = x },
+                else => self.fail(pos, "data-to-bool needs a bool, but this is {s}", .{kind_name(vals[0].data)}),
+            },
+            .@"data-to-str" => switch (vals[0].data.data) {
+                .string => |raw| .{ .str = try self.decode(pos, raw) },
+                else => self.fail(pos, "data-to-str needs a symbol, but this is {s}", .{kind_name(vals[0].data)}),
+            },
+            .@"to-data" => .{ .data = try self.to_data(pos, vals[0]) },
+            .symbol => .{ .data = .{ .pos = pos, .data = .{ .string = try self.encode(vals[0].str) } } },
+            .@"data-array" => unreachable, // handled above
+            .eval => try self.eval_data(pos, vals[0].data),
         };
+    }
+
+    fn expect_array(self: *Session, pos: u32, d: reader.Value) Error![]const reader.Value {
+        return switch (d.data) {
+            .array => |xs| xs,
+            else => self.fail(pos, "this needs an array, but it is {s}", .{kind_name(d)}),
+        };
+    }
+
+    fn expect_object(self: *Session, pos: u32, d: reader.Value) Error![]const reader.Pair {
+        return switch (d.data) {
+            .object => |ps| ps,
+            else => self.fail(pos, "this needs an object, but it is {s}", .{kind_name(d)}),
+        };
+    }
+
+    /// Keys are stored as raw JSON text, so they are decoded to compare.
+    fn find_field(self: *Session, pairs: []const reader.Pair, key: []const u8) Error!?reader.Value {
+        for (pairs) |p| {
+            const k = try self.decode(p.key.pos, p.key.data.string);
+            if (std.mem.eql(u8, k, key)) return p.value;
+        }
+        return null;
+    }
+
+    /// Raw JSON string contents (as the reader keeps them) to text.
+    fn decode(self: *Session, pos: u32, raw: []const u8) Error![]const u8 {
+        return analyzer.decode_string(self.alloc, raw) catch |err| switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.InvalidEscape => self.fail(pos, "invalid \\u escape in string", .{}),
+        };
+    }
+
+    /// Text to raw JSON string contents, the form data values store.
+    fn encode(self: *Session, text: []const u8) Error![]const u8 {
+        var w: Writer.Allocating = .init(self.alloc);
+        try printer.write_json_text(&w.writer, text);
+        const quoted = w.written();
+        return quoted[1 .. quoted.len - 1];
+    }
+
+    /// The code that evaluates to v: running the result gives v back.
+    fn to_data(self: *Session, pos: u32, v: Value) Error!reader.Value {
+        const data: @FieldType(reader.Value, "data") = switch (v) {
+            .int => |i| .{ .int = try std.fmt.allocPrint(self.alloc, "{d}", .{i}) },
+            .float => |f| blk: {
+                if (!std.math.isFinite(f)) return self.fail(pos, "{d} has no data form", .{f});
+                var w: Writer.Allocating = .init(self.alloc);
+                try printer.write_json_float(&w.writer, f);
+                break :blk .{ .float = w.written() };
+            },
+            .bool => |b| .{ .bool = b },
+            .null => .null,
+            // A string is written {"str": "..."} in code.
+            .str => |text| blk: {
+                const pair = try self.alloc.alloc(reader.Pair, 1);
+                pair[0] = .{
+                    .key = .{ .pos = pos, .data = .{ .string = "str" } },
+                    .value = .{ .pos = pos, .data = .{ .string = try self.encode(text) } },
+                };
+                break :blk .{ .object = pair };
+            },
+            // Data is written ["data", ...] in code.
+            .data => |d| blk: {
+                const items = try self.alloc.alloc(reader.Value, 2);
+                items[0] = .{ .pos = pos, .data = .{ .string = "data" } };
+                items[1] = d;
+                break :blk .{ .array = items };
+            },
+            .func => return self.fail(pos, "a function has no data form", .{}),
+        };
+        return .{ .pos = pos, .data = data };
+    }
+
+    /// ["eval", d]: analyzes, checks and runs d as an expression that
+    /// can see the globals (but not the caller's locals), and returns its
+    /// value as data: a data result as it is, anything else converted with
+    /// to-data. Errors in the evaluated code are runtime errors here.
+    fn eval_data(self: *Session, pos: u32, d: reader.Value) Error!Value {
+        var diag: Diagnostic = undefined;
+        const item = analyzer.analyze_form(self.src, d, self.alloc, &diag) catch |err| switch (err) {
+            error.AnalysisFailed => return self.fail(pos, "eval: {s}", .{diag.message}),
+            else => |e| return e,
+        };
+        if (item != .expr) return self.fail(pos, "eval can only evaluate expressions, not def or fn", .{});
+
+        // The checker only needs the globals' types, and every runtime
+        // value's type can be read off the value itself.
+        var types: checker.Session = .{ .src = self.src, .alloc = self.alloc, .diag = null };
+        var it = self.globals.iterator();
+        while (it.next()) |g| {
+            try types.globals.put(self.alloc, g.key_ptr.*, .{ .type = try type_of_value(self.alloc, g.value_ptr.*), .index = 0, .kind = .def });
+        }
+        types.next_index = 1;
+        const t = (types.check_form(self.src, item, &diag) catch |err| switch (err) {
+            error.TypeError => return self.fail(pos, "eval: {s}", .{diag.message}),
+            else => |e| return e,
+        }).?;
+        if (t == .@"fn") return self.fail(pos, "eval: the result is a function, which has no data form", .{});
+
+        const result = try self.eval(item.expr, null);
+        if (result == .data) return result;
+        return .{ .data = try self.to_data(pos, result) };
     }
 
     fn arithmetic(self: *Session, pos: u32, b: Builtin, x: Value, y: Value) Error!Value {
@@ -312,6 +510,36 @@ pub fn write_value(out: *Writer, v: Value) Writer.Error!void {
         .data => |d| try printer.write_json_value(out, d),
         .func => unreachable,
     }
+}
+
+/// The type of a runtime value.
+fn type_of_value(alloc: Allocator, v: Value) Allocator.Error!ast.Type {
+    return switch (v) {
+        .int => .i64,
+        .float => .f64,
+        .bool => .bool,
+        .null => .null,
+        .str => .str,
+        .data => .data,
+        .func => |c| blk: {
+            const t = try alloc.create(ast.FnType);
+            t.* = try c.lambda.fn_type(alloc);
+            break :blk .{ .@"fn" = t };
+        },
+    };
+}
+
+/// How a data value's kind is described in error messages.
+fn kind_name(d: reader.Value) []const u8 {
+    return switch (d.data) {
+        .null => "null",
+        .bool => "a bool",
+        .int => "an int",
+        .float => "a float",
+        .string => "a symbol",
+        .array => "an array",
+        .object => "an object",
+    };
 }
 
 fn compare(b: Builtin, x: Value, y: Value) bool {

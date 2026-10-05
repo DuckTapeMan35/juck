@@ -1,0 +1,53 @@
+// Code as data: inspecting, converting, building and running code.
+[
+  ["def", {"name": "code", "type": "data"}, ["data", ["+", 1, ["*", 2, 3]]]],
+
+  // inspecting
+  ["print", ["data-array?", "code"]],
+  ["print", ["data-len", "code"]],
+  ["print", ["data-get", "code", 0]],
+  ["print", ["data-to-str", ["data-get", "code", 0]]],
+  ["print", ["data-symbol?", ["data-get", "code", 0]]],
+  ["print", ["data-int?", ["data-get", "code", 1]]],
+  ["print", ["data-slice", "code", 1, 3]],
+
+  // running
+  ["print", ["eval", "code"]],
+  ["print", ["data-to-i64", ["eval", "code"]]],
+
+  // converting values to code, and back
+  ["print", ["to-data", 42]],
+  ["print", ["to-data", 1.5]],
+  ["print", ["to-data", {"str": "hi"}]],
+  ["print", ["to-data", ["data", ["x"]]]],
+  ["print", ["eval", ["to-data", {"str": "hi"}]]],
+  ["print", ["symbol", {"str": "x"}]],
+
+  // objects
+  ["def", {"name": "a-fn", "type": "data"},
+    ["data", ["fn", {"name": "f", "params": [], "returns": "i64"}, 1]]],
+  ["print", ["data-field", ["data-get", "a-fn", 1], {"str": "name"}]],
+  ["print", ["data-has?", ["data-get", "a-fn", 1], {"str": "doc"}]],
+
+  // building with templates
+  ["fn", {"name": "square-code", "params": [["e", "data"]], "returns": "data"},
+    ["template", ["*", ["insert", "e"], ["insert", "e"]]]],
+  ["print", ["square-code", ["data", ["+", 1, 2]]]],
+  ["print", ["data-to-i64", ["eval", ["square-code", ["data", ["+", 1, 2]]]]]],
+
+  ["fn", {"name": "sum-code", "params": [["args", "data"]], "returns": "data"},
+    ["template", ["+", ["splice", "args"]]]],
+  ["print", ["sum-code", ["data", [1, 2]]]],
+  ["print", ["eval", ["sum-code", ["data", [1, 2]]]]],
+  ["print", ["template", {"a": ["insert", ["to-data", true]], "b": 2}]],
+
+  ["print", ["data-array", ["symbol", {"str": "-"}], ["to-data", 10], ["to-data", 3]]],
+  ["print", ["eval", ["data-array", ["symbol", {"str": "-"}], ["to-data", 10], ["to-data", 3]]]],
+
+  // evaluated code sees the globals
+  ["fn", {"name": "double", "params": [["n", "i64"]], "returns": "i64"}, ["*", "n", 2]],
+  ["print", ["eval", ["data", ["double", 21]]]],
+
+  // a data result comes back as it is
+  ["print", ["eval", ["data", ["square-code", ["data", 5]]]]],
+]

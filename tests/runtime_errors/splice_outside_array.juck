@@ -1,0 +1,2 @@
+// error: 2:15
+[["template", ["splice", "x"]]]

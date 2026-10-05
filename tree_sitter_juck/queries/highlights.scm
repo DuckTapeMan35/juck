@@ -16,12 +16,14 @@
 (array . (string) @function.call)
 
 ; ...a built-in...
+(#any-of? @_head "+" "-" "*" "/" "%" "<" "<=" ">" ">=" "=" "!=" "not" "print"
+    "to-data" "symbol" "eval"))
 ((array . (string (string_content) @_head) @function.builtin)
-  (#any-of? @_head "+" "-" "*" "/" "%" "<" "<=" ">" ">=" "=" "!=" "not" "print"))
+  (#match? @_head "^data-"))
 
 ; ...or a special form.
 ((array . (string (string_content) @_head) @keyword)
-  (#any-of? @_head "def" "fn" "lambda" "type" "if" "let" "do" "data"))
+  (#any-of? @_head "def" "fn" "lambda" "type" "if" "let" "do" "data" "template" "insert" "splice"))
 
 ; Keys of objects (definition objects, type objects).
 (pair key: (string) @property)

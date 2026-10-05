@@ -1,0 +1,2 @@
+// error: 2:2
+[["data-to-i64", ["data", "x"]]]
