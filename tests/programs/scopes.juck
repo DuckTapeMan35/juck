@@ -1,0 +1,7 @@
+// Names can't shadow, but scopes that don't overlap may reuse a name.
+[
+  ["let", [["x", "i64", 1]], ["print", "x"]],
+  ["let", [["x", "f64", 2.0]], ["print", "x"]],
+  ["fn", {"name": "f", "params": [["n", "i64"]], "returns": "i64"}, "n"],
+  ["fn", {"name": "g", "params": [["n", "i64"]], "returns": "i64"}, "n"],
+]

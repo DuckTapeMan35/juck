@@ -1,0 +1,2 @@
+// error: 2:53
+[["let", [["x", "i64", 1]], ["lambda", {"params": [["x", "i64"]], "returns": "i64"}, "x"]]]

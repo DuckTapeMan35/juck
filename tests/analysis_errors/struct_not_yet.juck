@@ -1,0 +1,2 @@
+// error: 2:33
+[["def", {"name": "p", "type": {"struct": []}}, null]]

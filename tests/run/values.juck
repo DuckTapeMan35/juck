@@ -1,0 +1,14 @@
+// Every printable type, globals, let and do.
+[
+  ["def", {"name": "pi", "type": "f64"}, 3.14159],
+  ["def", {"name": "greeting", "type": "str"}, {"str": "hello, \"world\"\n\u00e9"}],
+  ["print", "pi"],
+  ["print", "greeting"],
+  ["print", null],
+  ["print", false],
+  ["print", ["data", ["+", "a", 1, {"k": [true, null]}]]],
+  ["print", ["data", "a-symbol"]],
+  ["print", ["=", ["data", {"a": 1, "b": 2}], ["data", {"b": 2, "a": 1}]]],
+  ["print", ["let", [["x", "i64", 2], ["y", "i64", ["*", "x", 10]]], ["+", "x", "y"]]],
+  ["print", ["do", ["print", 1], ["print", 2], 3]],
+]

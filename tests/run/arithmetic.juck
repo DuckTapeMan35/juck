@@ -1,0 +1,22 @@
+// Integer and float arithmetic, comparisons and equality.
+[
+  ["print", ["+", 2, 3]],
+  ["print", ["-", 2, 3]],
+  ["print", ["*", -4, 5]],
+  ["print", ["/", 7, 2]],
+  ["print", ["/", -7, 2]],
+  ["print", ["%", 7, 3]],
+  ["print", ["%", -7, 3]],
+  ["print", ["+", 0.1, 0.2]],
+  ["print", ["/", 1.0, 4.0]],
+  ["print", ["*", 2.0, 3.0]],
+  ["print", ["/", 1.0, 0.0]],
+  ["print", ["/", 0.0, 0.0]],
+  ["print", 6.022e23],
+  ["print", 1.5e-10],
+  ["print", ["<", 1, 2]],
+  ["print", [">=", 2.5, 2.5]],
+  ["print", ["=", 3, 3]],
+  ["print", ["!=", {"str": "a"}, {"str": "b"}]],
+  ["print", ["not", true]],
+]

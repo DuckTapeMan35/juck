@@ -1,0 +1,31 @@
+// Recursion, mutual recursion, closures and higher-order functions.
+[
+  ["fn", {"name": "fact", "params": [["n", "i64"]], "returns": "i64"},
+    ["if", ["<=", "n", 1],
+      1,
+      ["*", "n", ["fact", ["-", "n", 1]]]]],
+
+  ["fn", {"name": "even?", "params": [["n", "i64"]], "returns": "bool"},
+    ["if", ["=", "n", 0], true, ["odd?", ["-", "n", 1]]]],
+  ["fn", {"name": "odd?", "params": [["n", "i64"]], "returns": "bool"},
+    ["if", ["=", "n", 0], false, ["even?", ["-", "n", 1]]]],
+
+  ["fn", {"name": "make-adder",
+          "params": [["n", "i64"]],
+          "returns": {"fn": {"params": ["i64"], "returns": "i64"}}},
+    ["lambda", {"params": [["x", "i64"]], "returns": "i64"},
+      ["+", "x", "n"]]],
+
+  ["fn", {"name": "twice",
+          "params": [["f", {"fn": {"params": ["i64"], "returns": "i64"}}], ["x", "i64"]],
+          "returns": "i64"},
+    ["f", ["f", "x"]]],
+
+  ["print", ["fact", 20]],
+  ["print", ["even?", 10]],
+  ["print", ["odd?", 7]],
+  ["print", [["make-adder", 1], 41]],
+  ["print", ["twice", ["make-adder", 10], 1]],
+  ["let", [["add5", {"fn": {"params": ["i64"], "returns": "i64"}}, ["make-adder", 5]]],
+    ["print", ["add5", ["add5", 0]]]],
+]

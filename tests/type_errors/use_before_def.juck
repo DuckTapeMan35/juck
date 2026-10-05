@@ -1,0 +1,2 @@
+// error: 2:12
+[["print", "x"], ["def", {"name": "x", "type": "i64"}, 1]]

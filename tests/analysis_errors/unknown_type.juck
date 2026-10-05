@@ -1,0 +1,2 @@
+// error: 2:32
+[["def", {"name": "x", "type": "int"}, 1]]

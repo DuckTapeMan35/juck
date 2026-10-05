@@ -1,0 +1,2 @@
+// error: 2:3
+[["f"], ["fn", {"name": "f", "params": [], "returns": "null"}, null]]

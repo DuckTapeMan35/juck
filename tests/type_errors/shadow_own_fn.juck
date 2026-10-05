@@ -1,0 +1,2 @@
+// error: 2:35
+[["fn", {"name": "f", "params": [["f", "i64"]], "returns": "i64"}, "f"]]

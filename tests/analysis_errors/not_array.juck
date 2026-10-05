@@ -1,0 +1,2 @@
+// error: 2:1
+{"str": "not a program"}

@@ -27,8 +27,12 @@ pub const Diagnostic = struct {
     message: []const u8,
 };
 
-/// Parses src into its top-level forms.
 pub fn read(src: []const u8, alloc: std.mem.Allocator, diag: ?*Diagnostic) !Value {
+    return read_at(src, 0, alloc, diag);
+}
+
+/// Parses src into its top-level forms.
+pub fn read_at(src: []const u8, offset: u32, alloc: std.mem.Allocator, diag: ?*Diagnostic) !Value {
     const parser = ts.Parser.create();
     defer parser.destroy();
     try parser.setLanguage(tree_sitter_juck());
@@ -37,16 +41,16 @@ pub fn read(src: []const u8, alloc: std.mem.Allocator, diag: ?*Diagnostic) !Valu
     defer tree.destroy();
     const root = tree.rootNode();
 
-    if (root.hasError()) return fail(diag, firstError(root).?.startPoint(), "syntax error");
+    if (root.hasError()) return fail(diag, first_error(root).?.startPoint(), "syntax error");
 
     // The grammar accepts any number of top-level values, so the error for
     // an extra one can point at exactly where it starts.
     var value: ?Value = null;
     var i: u32 = 0;
     while (root.namedChild(i)) |child| : (i += 1) {
-        if (isComment(child)) continue;
+        if (is_comment(child)) continue;
         if (value != null) return fail(diag, child.startPoint(), "expected a single top-level value");
-        value = try convert(child, src, alloc);
+        value = try convert(child, src, offset, alloc, diag);
     }
     return value orelse return fail(diag, root.endPoint(), "expected a value, but the file is empty");
 }
@@ -61,10 +65,10 @@ fn fail(diag: ?*Diagnostic, point: ts.Point, message: []const u8) error{InvalidI
     return error.InvalidInput;
 }
 
-fn convert(node: ts.Node, src: []const u8, alloc: std.mem.Allocator) !Value {
+fn convert(node: ts.Node, src: []const u8, offset: u32, alloc: std.mem.Allocator, diag: ?*Diagnostic) !Value {
     const kind = node.kind();
     const text = src[node.startByte()..node.endByte()];
-    const pos = node.startByte();
+    const pos = offset + node.startByte();
 
     if (eql(kind, "null")) return .{ .pos = pos, .data = .null };
     if (eql(kind, "true")) return .{ .pos = pos, .data = .{ .bool = true } };
@@ -78,8 +82,8 @@ fn convert(node: ts.Node, src: []const u8, alloc: std.mem.Allocator) !Value {
         var items: std.ArrayList(Value) = .empty;
         var i: u32 = 0;
         while (node.namedChild(i)) |child| : (i += 1) {
-            if (isComment(child)) continue;
-            try items.append(alloc, try convert(child, src, alloc));
+            if (is_comment(child)) continue;
+            try items.append(alloc, try convert(child, src, offset, alloc, diag));
         }
         return .{ .pos = pos, .data = .{ .array = try items.toOwnedSlice(alloc) } };
     }
@@ -87,10 +91,17 @@ fn convert(node: ts.Node, src: []const u8, alloc: std.mem.Allocator) !Value {
         var pairs: std.ArrayList(Pair) = .empty;
         var i: u32 = 0;
         while (node.namedChild(i)) |pair| : (i += 1) {
-            if (isComment(pair)) continue;
+            if (is_comment(pair)) continue;
+            const key_node = pair.childByFieldName("key").?;
+            const key = try convert(key_node, src, offset, alloc, diag);
+            for (pairs.items) |earlier| {
+                if (std.mem.eql(u8, earlier.key.data.string, key.data.string)) {
+                    return fail(diag, key_node.startPoint(), "duplicate key in object");
+                }
+            }
             try pairs.append(alloc, .{
-                .key = try convert(pair.childByFieldName("key").?, src, alloc),
-                .value = try convert(pair.childByFieldName("value").?, src, alloc),
+                .key = key,
+                .value = try convert(pair.childByFieldName("value").?, src, offset, alloc, diag),
             });
         }
         return .{ .pos = pos, .data = .{ .object = try pairs.toOwnedSlice(alloc) } };
@@ -99,18 +110,18 @@ fn convert(node: ts.Node, src: []const u8, alloc: std.mem.Allocator) !Value {
 }
 
 /// Depth-first search for the first ERROR or MISSING node.
-fn firstError(node: ts.Node) ?ts.Node {
+fn first_error(node: ts.Node) ?ts.Node {
     if (node.isError() or node.isMissing()) return node;
     var i: u32 = 0;
     while (node.child(i)) |child| : (i += 1) {
         if (child.hasError() or child.isMissing()) {
-            if (firstError(child)) |e| return e;
+            if (first_error(child)) |e| return e;
         }
     }
     return null;
 }
 
-fn isComment(node: ts.Node) bool {
+fn is_comment(node: ts.Node) bool {
     return eql(node.kind(), "comment");
 }
 

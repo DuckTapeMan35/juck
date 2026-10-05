@@ -116,10 +116,70 @@ pub fn build(b: *std.Build) void {
     });
     reader_mod.addCSourceFile(.{ .file = ts_gen_dir.path(b, "parser.c") });
     reader_mod.addIncludePath(ts_gen_dir);
+
     const printer_mod = b.createModule(.{
         .root_source_file = b.path("src/printer.zig"),
         .target = target,
         .imports = &.{.{ .name = "reader", .module = reader_mod }},
+    });
+
+    const ast_mod = b.createModule(.{
+        .root_source_file = b.path("src/ast.zig"),
+        .target = target,
+        .imports = &.{.{ .name = "reader", .module = reader_mod }},
+    });
+
+    const analyzer_mod = b.createModule(.{
+        .root_source_file = b.path("src/analyzer.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "reader", .module = reader_mod },
+            .{ .name = "ast", .module = ast_mod },
+        },
+    });
+
+    const harness_mod = b.createModule(.{
+        .root_source_file = b.path("tests/harness.zig"),
+        .target = target,
+    });
+
+    const builtins_mod = b.createModule(.{
+        .root_source_file = b.path("src/builtins.zig"),
+        .target = target,
+    });
+    const checker_mod = b.createModule(.{
+        .root_source_file = b.path("src/checker.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "reader", .module = reader_mod },
+            .{ .name = "ast", .module = ast_mod },
+            .{ .name = "analyzer", .module = analyzer_mod },
+            .{ .name = "builtins", .module = builtins_mod },
+        },
+    });
+
+    const interpreter_mod = b.createModule(.{
+        .root_source_file = b.path("src/interpreter.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "reader", .module = reader_mod },
+            .{ .name = "ast", .module = ast_mod },
+            .{ .name = "analyzer", .module = analyzer_mod },
+            .{ .name = "printer", .module = printer_mod },
+            .{ .name = "builtins", .module = builtins_mod },
+        },
+    });
+
+    const repl_mod = b.createModule(.{
+        .root_source_file = b.path("src/repl.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "reader", .module = reader_mod },
+            .{ .name = "ast", .module = ast_mod },
+            .{ .name = "analyzer", .module = analyzer_mod },
+            .{ .name = "checker", .module = checker_mod },
+            .{ .name = "interpreter", .module = interpreter_mod },
+        },
     });
 
     // Here we define an executable. An executable needs to have a root module
@@ -167,6 +227,10 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addImport("lexer", lexer_mod);
     exe.root_module.addImport("reader", reader_mod);
     exe.root_module.addImport("printer", printer_mod);
+    exe.root_module.addImport("analyzer", analyzer_mod);
+    exe.root_module.addImport("checker", checker_mod);
+    exe.root_module.addImport("interpreter", interpreter_mod);
+    exe.root_module.addImport("repl", repl_mod);
 
     // This declares intent for the executable to be installed into the
     // install prefix when running `zig build` (i.e. when executing the default
@@ -226,11 +290,51 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "reader", .module = reader_mod },
                 .{ .name = "printer", .module = printer_mod },
+                .{ .name = "harness", .module = harness_mod },
             },
         }),
     });
     const run_reader_tests = b.addRunArtifact(reader_tests);
     run_reader_tests.setCwd(b.path("."));
+
+    const ast_tests = b.addTest(.{ .root_module = ast_mod });
+
+    const analyzer_unit_tests = b.addTest(.{ .root_module = analyzer_mod });
+
+    const analyzer_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/analyzer_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "reader", .module = reader_mod },
+                .{ .name = "analyzer", .module = analyzer_mod },
+                .{ .name = "harness", .module = harness_mod },
+                .{ .name = "checker", .module = checker_mod },
+            },
+        }),
+    });
+    const run_analyzer_tests = b.addRunArtifact(analyzer_tests);
+    run_analyzer_tests.setCwd(b.path("."));
+
+    const run_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/run_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "reader", .module = reader_mod },
+                .{ .name = "ast", .module = ast_mod },
+                .{ .name = "analyzer", .module = analyzer_mod },
+                .{ .name = "checker", .module = checker_mod },
+                .{ .name = "interpreter", .module = interpreter_mod },
+            },
+        }),
+    });
+    const run_run_tests = b.addRunArtifact(run_tests);
+    run_run_tests.setCwd(b.path("."));
+
+    const repl_unit_tests = b.addTest(.{ .root_module = repl_mod });
 
     // A top level step for running all tests. dependOn can be called multiple
     // times and since the two run steps do not depend on one another, this will
@@ -239,6 +343,10 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
     test_step.dependOn(&run_reader_tests.step);
+    test_step.dependOn(&b.addRunArtifact(ast_tests).step);
+    test_step.dependOn(&b.addRunArtifact(analyzer_unit_tests).step);
+    test_step.dependOn(&run_analyzer_tests.step);
+    test_step.dependOn(&b.addRunArtifact(repl_unit_tests).step);
 
     b.getInstallStep().dependOn(&run_reader_tests.step);
 
