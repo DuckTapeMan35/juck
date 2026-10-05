@@ -107,6 +107,32 @@ pub fn build(b: *std.Build) void {
     ts_gen.addArg("-o");
     const ts_gen_dir = ts_gen.addOutputDirectoryArg("tree_sitter_juck");
     ts_gen.setCwd(b.path("tree_sitter_juck"));
+
+    // Neovim plugin: `zig build nvim` assembles zig-out/nvim/, a plugin
+    // directory with the parser, the highlight queries and the Lua files.
+    const nvim_step = b.step("nvim", "Build the Neovim plugin into zig-out/nvim");
+    const nvim_parser = b.addLibrary(.{
+        .name = "juck",
+        .linkage = .dynamic,
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = .ReleaseFast,
+            .link_libc = true,
+        }),
+    });
+    nvim_parser.root_module.addCSourceFile(.{ .file = ts_gen_dir.path(b, "parser.c") });
+    nvim_parser.root_module.addIncludePath(ts_gen_dir);
+    nvim_step.dependOn(&b.addInstallFileWithDir(nvim_parser.getEmittedBin(), .{ .custom = "nvim/parser" }, "juck.so").step);
+    nvim_step.dependOn(&b.addInstallDirectory(.{
+        .source_dir = b.path("tree_sitter_juck/queries"),
+        .install_dir = .prefix,
+        .install_subdir = "nvim/queries/juck",
+    }).step);
+    nvim_step.dependOn(&b.addInstallDirectory(.{
+        .source_dir = b.path("editors/nvim"),
+        .install_dir = .prefix,
+        .install_subdir = "nvim",
+    }).step);
     const reader_mod = b.createModule(.{
         .root_source_file = b.path("src/ts_reader.zig"),
         .target = target,
