@@ -24,7 +24,7 @@
 
 ; ...or a special form.
 ((array . (string (string_content) @_head) @keyword)
-  (#any-of? @_head "def" "fn" "lambda" "macro" "type" "if" "let" "do" "data" "template" "insert" "splice"))
+  (#any-of? @_head "def" "fn" "lambda" "macro" "import" "type" "if" "let" "do" "data" "template" "insert" "splice"))
 
 ; Keys of objects (definition objects, type objects).
 (pair key: (string) @property)

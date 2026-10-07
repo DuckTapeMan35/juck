@@ -25,6 +25,65 @@ pub const Diagnostic = struct {
     line: u32,
     column: u32,
     message: []const u8,
+    file: []const u8 = "",
+
+    pub fn format(self: Diagnostic, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        if (self.file.len > 0) {
+            try w.print("{s}:{d}:{d}: {s}", .{ self.file, self.line, self.column, self.message });
+        } else {
+            try w.print("error at {d}:{d}: {s}", .{ self.line, self.column, self.message });
+        }
+    }
+};
+
+pub const Sources = struct {
+    files: std.ArrayList(File) = .empty,
+
+    pub const File = struct {
+        name: []const u8,
+        text: []const u8,
+        /// Offset of the file's first byte.
+        start: u32,
+        /// Free for the owner to use, e.g. the module the file belongs to.
+        owner: ?*anyopaque = null,
+    };
+
+    /// Adds a source, returning the offset its positions start at.
+    pub fn add(self: *Sources, alloc: std.mem.Allocator, name: []const u8, text: []const u8, owner: ?*anyopaque) !u32 {
+        const start: u32 = if (self.files.items.len == 0) 0 else blk: {
+            const last = self.files.items[self.files.items.len - 1];
+            // +1 so that a position just past the end of one file is not
+            // the start of the next.
+            break :blk last.start + @as(u32, @intCast(last.text.len)) + 1;
+        };
+        try self.files.append(alloc, .{ .name = name, .text = text, .start = start, .owner = owner });
+        return start;
+    }
+
+    /// The source a position belongs to.
+    pub fn file_of(self: *const Sources, pos: u32) ?*const File {
+        var i = self.files.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (self.files.items[i].start <= pos) return &self.files.items[i];
+        }
+        return null;
+    }
+
+    /// A diagnostic at pos, with the line and column inside its file.
+    pub fn diagnostic(self: *const Sources, pos: u32, message: []const u8) Diagnostic {
+        const f = self.file_of(pos) orelse return .{ .line = 0, .column = 0, .message = message };
+        const offset = @min(pos - f.start, f.text.len);
+        var line: u32 = 1;
+        var line_start: usize = 0;
+        for (f.text[0..offset], 0..) |c, i| {
+            if (c == '\n') {
+                line += 1;
+                line_start = i + 1;
+            }
+        }
+        return .{ .line = line, .column = @intCast(offset - line_start + 1), .message = message, .file = f.name };
+    }
 };
 
 pub fn read(src: []const u8, alloc: std.mem.Allocator, diag: ?*Diagnostic) !Value {

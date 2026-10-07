@@ -11,9 +11,9 @@ const Diagnostic = reader.Diagnostic;
 pub const Error = error{TypeError} || Allocator.Error;
 
 /// Checks a whole program. On an error, fills diag if given, otherwise prints it
-pub fn check(src: []const u8, program: ast.Program, alloc: Allocator, diag: ?*Diagnostic) Error!void {
-    var s: Session = .{ .src = src, .alloc = alloc, .diag = diag };
-    try s.check_program(src, program, diag);
+pub fn check(sources: *const reader.Sources, program: ast.Program, alloc: Allocator, diag: ?*Diagnostic) Error!void {
+    var s: Session = .{ .sources = sources, .alloc = alloc, .diag = diag };
+    try s.check_program(sources, program, diag);
 }
 
 fn kind_name(kind: @FieldType(Global, "kind")) []const u8 {
@@ -34,7 +34,7 @@ pub const Global = struct {
 const Local = struct { name: []const u8, type: Type };
 
 pub const Session = struct {
-    src: []const u8,
+    sources: *const reader.Sources,
     alloc: Allocator,
     diag: ?*Diagnostic,
 
@@ -51,18 +51,18 @@ pub const Session = struct {
 
     fn fail(self: *Session, pos: u32, comptime fmt: []const u8, args: anytype) Error {
         const message = try std.fmt.allocPrint(self.alloc, fmt, args);
-        const d = analyzer.diagnostic_at(self.src, pos, message);
+        const d = self.sources.diagnostic(pos, message);
         if (self.diag) |out| {
             out.* = d;
         } else {
-            std.debug.print("error at {d}:{d}: {s}\n", .{ d.line, d.column, d.message });
+            std.debug.print("{f}\n", .{d});
         }
         return error.TypeError;
     }
 
     // program
-    pub fn check_program(self: *Session, src: []const u8, program: ast.Program, diag: ?*Diagnostic) Error!void {
-        self.src = src;
+    pub fn check_program(self: *Session, sources: *const reader.Sources, program: ast.Program, diag: ?*Diagnostic) Error!void {
+        self.sources = sources;
         self.diag = diag;
         // First, declare every global with its type, so function bodies can
         // call functions defined later (including each other), and so using
@@ -77,7 +77,7 @@ pub const Session = struct {
                 }),
                 // Macros are expanded away, but their names are taken.
                 .macro => |m| try self.declare(m.pos, m.name, .{ .type = .null, .index = i, .kind = .macro }),
-                .expr => {},
+                .import, .expr => {},
             }
         }
 
@@ -93,7 +93,7 @@ pub const Session = struct {
                     defer self.in_fn_body = false;
                     try self.check_lambda(f.lambda);
                 },
-                .macro => {}, // checked when it was defined, by the macro host
+                .macro, .import => {}, // checked when it was defined, by the macro host
                 .expr => |e| _ = try self.type_of(e),
             }
         }
@@ -104,8 +104,8 @@ pub const Session = struct {
     /// be defined again, but only with the same type, so everything checked
     /// against the old definition stays valid. Returns the type of an
     /// expression form, or null for a definition.
-    pub fn check_form(self: *Session, src: []const u8, item: ast.TopLevel, diag: ?*Diagnostic) Error!?Type {
-        self.src = src;
+    pub fn check_form(self: *Session, sources: *const reader.Sources, item: ast.TopLevel, diag: ?*Diagnostic) Error!?Type {
+        self.sources = sources;
         self.diag = diag;
         self.current = self.next_index;
         self.next_index += 1;
@@ -138,6 +138,7 @@ pub const Session = struct {
                 return null;
             },
             .expr => |e| return try self.type_of(e),
+            .import => return null,
         }
     }
 

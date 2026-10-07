@@ -1,0 +1,1 @@
+[["import", "a", "cycle_a"], ["fn", {"name": "b", "params": [], "returns": "i64", "pub": true}, 2]]

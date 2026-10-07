@@ -8,6 +8,7 @@ const checker = @import("checker");
 
 const Allocator = std.mem.Allocator;
 const Diagnostic = reader.Diagnostic;
+const no_sources: reader.Sources = .{};
 const Writer = std.Io.Writer;
 
 pub const Error = error{RuntimeError} || Allocator.Error || Writer.Error;
@@ -52,26 +53,28 @@ pub const Options = struct {
     gensyms: ?*analyzer.Gensyms = null,
     /// Macros available to code run by eval.
     macros: ?analyzer.MacroHost = null,
+    /// How code run by eval resolves global names.
+    scope: ?analyzer.Scope = null,
 };
 
 /// Runs `program`, writing `print` output to `out`. On a runtime error,
 /// fills `diag` if given, otherwise prints it.
 pub fn run(
-    src: []const u8,
+    sources: *const reader.Sources,
     program: ast.Program,
     alloc: Allocator,
     out: *Writer,
     diag: ?*Diagnostic,
     options: Options,
 ) Error!void {
-    var session: Session = .{ .src = src, .alloc = alloc, .out = out, .diag = diag, .options = options };
-    try session.run_program(src, program, diag);
+    var session: Session = .{ .sources = sources, .alloc = alloc, .out = out, .diag = diag, .options = options };
+    try session.run_program(sources, program, diag);
 }
 
 /// The interpreter's state: global values. `run` uses one for a single
 /// program; the REPL keeps one alive and feeds it one form at a time.
 pub const Session = struct {
-    src: []const u8 = "",
+    sources: *const reader.Sources = &no_sources,
     alloc: Allocator,
     out: *Writer,
     diag: ?*Diagnostic = null,
@@ -81,14 +84,14 @@ pub const Session = struct {
     depth: u32 = 0,
 
     /// Runs a whole program.
-    pub fn run_program(self: *Session, src: []const u8, program: ast.Program, diag: ?*Diagnostic) Error!void {
-        _ = try self.on_big_stack(src, diag, .{ .program = program });
+    pub fn run_program(self: *Session, sources: *const reader.Sources, program: ast.Program, diag: ?*Diagnostic) Error!void {
+        _ = try self.on_big_stack(sources, diag, .{ .program = program });
     }
 
     /// Calls a function value with already-evaluated arguments (used to run
     /// macros). pos is where errors in the call itself are reported.
-    pub fn apply(self: *Session, src: []const u8, f: *const Closure, args: []const Value, pos: u32, diag: ?*Diagnostic) Error!Value {
-        return (try self.on_big_stack(src, diag, .{ .apply = .{ .f = f, .args = args, .pos = pos } })).?;
+    pub fn apply(self: *Session, sources: *const reader.Sources, f: *const Closure, args: []const Value, pos: u32, diag: ?*Diagnostic) Error!Value {
+        return (try self.on_big_stack(sources, diag, .{ .apply = .{ .f = f, .args = args, .pos = pos } })).?;
     }
 
     /// Runs one more top-level form (used by the REPL). A definition
@@ -96,8 +99,8 @@ pub const Session = struct {
     /// globals when they are called, so they see the new definition.
     /// Returns the value of an expression form, or null for a definition.
     /// item must stay alive as long as the session: closures point into it.
-    pub fn run_form(self: *Session, src: []const u8, item: *const ast.TopLevel, diag: ?*Diagnostic) Error!?Value {
-        return self.on_big_stack(src, diag, .{ .form = item });
+    pub fn run_form(self: *Session, sources: *const reader.Sources, item: *const ast.TopLevel, diag: ?*Diagnostic) Error!?Value {
+        return self.on_big_stack(sources, diag, .{ .form = item });
     }
 
     const Job = union(enum) {
@@ -107,10 +110,10 @@ pub const Session = struct {
     };
 
     /// Runs job on a thread with a stack of options.stack_size.
-    fn on_big_stack(self: *Session, src: []const u8, diag: ?*Diagnostic, job: Job) Error!?Value {
-        const saved = .{ self.src, self.diag, self.depth };
-        defer self.src, self.diag, self.depth = saved;
-        self.src = src;
+    fn on_big_stack(self: *Session, sources: *const reader.Sources, diag: ?*Diagnostic, job: Job) Error!?Value {
+        const saved = .{ self.sources, self.diag, self.depth };
+        defer self.sources, self.diag, self.depth = saved;
+        self.sources = sources;
         self.diag = diag;
         self.depth = 0;
         var result: Error!?Value = null;
@@ -139,7 +142,7 @@ pub const Session = struct {
                     try self.globals.put(self.alloc, f.name, try self.closure(&f.lambda, null));
                     return null;
                 },
-                .macro => return null,
+                .macro, .import => return null,
                 .expr => |e| return try self.eval(e, null),
             },
             .apply => |a| return try self.apply_closure(a.pos, a.f, a.args),
@@ -148,11 +151,11 @@ pub const Session = struct {
 
     fn fail(self: *Session, pos: u32, comptime fmt: []const u8, args: anytype) Error {
         const message = try std.fmt.allocPrint(self.alloc, fmt, args);
-        const d = analyzer.diagnostic_at(self.src, pos, message);
+        const d = self.sources.diagnostic(pos, message);
         if (self.diag) |out| {
             out.* = d;
         } else {
-            std.debug.print("runtime error at {d}:{d}: {s}\n", .{ d.line, d.column, d.message });
+            std.debug.print("runtime error: {f}\n", .{d});
         }
         return error.RuntimeError;
     }
@@ -172,7 +175,7 @@ pub const Session = struct {
         for (program.items) |item| {
             switch (item) {
                 .def => |d| try self.globals.put(self.alloc, d.name, try self.eval(d.value, null)),
-                .@"fn", .macro => {},
+                .@"fn", .macro, .import => {},
                 .expr => |e| _ = try self.eval(e, null),
             }
         }
@@ -466,9 +469,10 @@ pub const Session = struct {
     /// to-data. Errors in the evaluated code are runtime errors here.
     fn eval_data(self: *Session, pos: u32, d: reader.Value) Error!Value {
         var diag: Diagnostic = undefined;
-        const item = analyzer.analyze_form(self.src, d, self.alloc, &diag, .{
+        const item = analyzer.analyze_form(self.sources, d, self.alloc, &diag, .{
             .macros = self.options.macros,
             .gensyms = self.options.gensyms,
+            .scope = self.options.scope,
         }) catch |err| switch (err) {
             error.AnalysisFailed => return self.fail(pos, "eval: {s}", .{diag.message}),
             else => |e| return e,
@@ -477,13 +481,17 @@ pub const Session = struct {
 
         // The checker only needs the globals' types, and every runtime
         // value's type can be read off the value itself.
-        var types: checker.Session = .{ .src = self.src, .alloc = self.alloc, .diag = null };
+        var types: checker.Session = .{
+            .sources = self.sources,
+            .alloc = self.alloc,
+            .diag = null,
+        };
         var it = self.globals.iterator();
         while (it.next()) |g| {
             try types.globals.put(self.alloc, g.key_ptr.*, .{ .type = try type_of_value(self.alloc, g.value_ptr.*), .index = 0, .kind = .def });
         }
         types.next_index = 1;
-        const t = (types.check_form(self.src, item, &diag) catch |err| switch (err) {
+        const t = (types.check_form(self.sources, item, &diag) catch |err| switch (err) {
             error.TypeError => return self.fail(pos, "eval: {s}", .{diag.message}),
             else => |e| return e,
         }).?;

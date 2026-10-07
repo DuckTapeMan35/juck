@@ -156,6 +156,7 @@ pub const TopLevel = union(enum) {
     def: Def,
     @"fn": Fn,
     macro: Macro,
+    import: Import,
     expr: Expr,
 };
 
@@ -165,6 +166,7 @@ pub const Def = struct {
     name: []const u8,
     type: Type,
     value: Expr,
+    is_pub: bool = false,
 };
 
 /// ["fn", {"name": ..., "params": ..., "returns": ..., "doc": ...}, body...]
@@ -174,6 +176,7 @@ pub const Fn = struct {
     doc: ?[]const u8,
     lambda: Lambda,
     is_comptime: bool = false,
+    is_pub: bool = false,
 };
 
 /// ["macro", {"name": ..., "params": [...], "rest": ..., "doc": ...}, body...]
@@ -186,12 +189,21 @@ pub const Macro = struct {
     doc: ?[]const u8,
     lambda: Lambda,
     has_rest: bool,
+    is_pub: bool = false,
 
     /// The number of arguments a call must have at least (exactly, without
     /// a rest parameter).
     pub fn fixed(self: Macro) usize {
         return self.lambda.params.len - @intFromBool(self.has_rest);
     }
+};
+
+/// ["import", name, path]. The module was loaded before analysis; this
+/// only records the form, so the program can be written back out.
+pub const Import = struct {
+    pos: u32,
+    name: []const u8,
+    path: []const u8,
 };
 
 test "type equality" {

@@ -7,31 +7,63 @@ const Allocator = std.mem.Allocator;
 const Value = reader.Value;
 const Entry = struct { []const u8, Value };
 
-pub fn program(alloc: Allocator, p: ast.Program) Allocator.Error!Value {
-    return rename_generated(alloc, try program_as_is(alloc, p));
+/// How a module refers to a module it imports: names starting with
+/// prefix (std/logic.) are written alias.name (logic.name).
+pub const Alias = struct {
+    prefix: []const u8,
+    alias: []const u8,
+};
+
+pub fn program(alloc: Allocator, p: ast.Program, aliases: []const Alias) Allocator.Error!Value {
+    const v = try program_as_is(alloc, p);
+    return rename_generated(alloc, if (aliases.len == 0) v else try apply_aliases(alloc, v, aliases));
 }
 
 fn program_as_is(alloc: Allocator, p: ast.Program) Allocator.Error!Value {
     var forms: std.ArrayList(Value) = .empty;
     for (p.items) |item| switch (item) {
-        .def => |d| try forms.append(alloc, try form(alloc, &.{
-            sym("def"),
-            try object(alloc, &.{
-                .{ "name", sym(d.name) },
-                .{ "type", try type_value(alloc, d.type) },
-            }),
-            try expr(alloc, d.value),
-        })),
-        .@"fn" => |f| try forms.append(alloc, try function(alloc, "fn", f.name, f.doc, f.is_comptime, f.lambda)),
+        .def => |d| {
+            var keys: std.ArrayList(Entry) = .empty;
+            try keys.append(alloc, .{ "name", sym(d.name) });
+            try keys.append(alloc, .{ "type", try type_value(alloc, d.type) });
+            if (d.is_pub) try keys.append(alloc, .{ "pub", .{ .pos = 0, .data = .{ .bool = true } } });
+            try forms.append(alloc, try form(
+                alloc,
+                &.{
+                    sym("def"),
+                    try object(alloc, keys.items),
+                    try expr(alloc, d.value),
+                },
+            ));
+        },
+        .@"fn" => |f| try forms.append(
+            alloc,
+            try function(
+                alloc,
+                "fn",
+                f.name,
+                f.doc,
+                f.is_comptime,
+                f.is_pub,
+                f.lambda,
+            ),
+        ),
         .macro => {},
+        .import => |i| try forms.append(alloc, try form(alloc, &.{ sym("import"), sym(i.name), sym(i.path) })),
         .expr => |e| try forms.append(alloc, try expr(alloc, e)),
     };
     return array(try forms.toOwnedSlice(alloc));
 }
 
-pub fn top_level(alloc: Allocator, item: ast.TopLevel) Allocator.Error!Value {
+pub fn top_level(alloc: Allocator, item: ast.TopLevel, aliases: []const Alias) Allocator.Error!Value {
+    const v = try top_level_as_is(alloc, item);
+    return if (aliases.len == 0) v else apply_aliases(alloc, v, aliases);
+}
+
+fn top_level_as_is(alloc: Allocator, item: ast.TopLevel) Allocator.Error!Value {
     return switch (item) {
-        .def, .@"fn", .macro => (try program_as_is(alloc, .{ .items = &.{item} })).data.array[0],
+        .def, .@"fn", .import => (try program_as_is(alloc, .{ .items = &.{item} })).data.array[0],
+        .macro => |m| sym(m.name),
         .expr => |e| expr(alloc, e),
     };
 }
@@ -64,7 +96,15 @@ pub fn expr(alloc: Allocator, e: ast.Expr) Allocator.Error!Value {
             break :blk with_body(alloc, &.{ sym("let"), array(bindings) }, l.body);
         },
         .do => |body| with_body(alloc, &.{sym("do")}, body),
-        .lambda => |l| function(alloc, "lambda", null, null, false, l.*),
+        .lambda => |l| function(
+            alloc,
+            "lambda",
+            null,
+            null,
+            false,
+            false,
+            l.*,
+        ),
         .template => |t| form(alloc, &.{ sym("template"), try template(alloc, t.*) }),
     };
 }
@@ -90,7 +130,15 @@ fn template(alloc: Allocator, t: ast.Template) Allocator.Error!Value {
     };
 }
 
-fn function(alloc: Allocator, head: []const u8, name: ?[]const u8, doc: ?[]const u8, is_comptime: bool, l: ast.Lambda) Allocator.Error!Value {
+fn function(
+    alloc: Allocator,
+    head: []const u8,
+    name: ?[]const u8,
+    doc: ?[]const u8,
+    is_comptime: bool,
+    is_pub: bool,
+    l: ast.Lambda,
+) Allocator.Error!Value {
     const params = try alloc.alloc(Value, l.params.len);
     for (l.params, params) |p, *out| out.* = try form(alloc, &.{ sym(p.name), try type_value(alloc, p.type) });
 
@@ -100,6 +148,7 @@ fn function(alloc: Allocator, head: []const u8, name: ?[]const u8, doc: ?[]const
     try keys.append(alloc, .{ "returns", try type_value(alloc, l.returns) });
     if (doc) |d| try keys.append(alloc, .{ "doc", .{ .pos = 0, .data = .{ .string = try encode(alloc, d) } } });
     if (is_comptime) try keys.append(alloc, .{ "comptime", .{ .pos = 0, .data = .{ .bool = true } } });
+    if (is_pub) try keys.append(alloc, .{ "pub", .{ .pos = 0, .data = .{ .bool = true } } });
 
     return with_body(alloc, &.{ sym(head), try object(alloc, keys.items) }, l.body);
 }
@@ -115,6 +164,27 @@ fn type_value(alloc: Allocator, t: ast.Type) Allocator.Error!Value {
             }) }});
         },
         else => sym(@tagName(t)),
+    };
+}
+
+/// std/logic.when back to logic.when, for every symbol in v
+fn apply_aliases(alloc: Allocator, v: Value, aliases: []const Alias) Allocator.Error!Value {
+    return switch (v.data) {
+        .string => |name| for (aliases) |a| {
+            if (std.mem.startsWith(u8, name, a.prefix))
+                break sym(try std.fmt.allocPrint(alloc, "{s}.{s}", .{ a.alias, name[a.prefix.len..] }));
+        } else v,
+        .array => |items| blk: {
+            const out = try alloc.alloc(Value, items.len);
+            for (items, out) |item, *o| o.* = try apply_aliases(alloc, item, aliases);
+            break :blk array(out);
+        },
+        .object => |pairs| blk: {
+            const out = try alloc.alloc(reader.Pair, pairs.len);
+            for (pairs, out) |pair, *o| o.* = .{ .key = pair.key, .value = try apply_aliases(alloc, pair.value, aliases) };
+            break :blk .{ .pos = v.pos, .data = .{ .object = out } };
+        },
+        else => v,
     };
 }
 

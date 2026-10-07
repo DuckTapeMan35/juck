@@ -1,34 +1,28 @@
 const std = @import("std");
-const reader = @import("reader");
-const ast = @import("ast");
-const analyzer = @import("analyzer");
-const checker = @import("checker");
-const interpreter = @import("interpreter");
-const macros = @import("macros");
+const modules = @import("modules");
 const harness = @import("harness.zig");
 
 const io = std.testing.io;
 
-const Prepared = struct { program: ast.Program, expander: *macros.Expander };
+const Outcome = union(enum) { ok, failed_early, runtime_error };
 
-/// Reads, analyzes and checks `src`; reports and returns null on failure.
-fn prepare(alloc: std.mem.Allocator, dir: []const u8, file: harness.File, out: *std.Io.Writer) !?Prepared {
-    var diag: reader.Diagnostic = undefined;
-    const value = reader.read(file.src, alloc, &diag) catch {
-        std.debug.print("FAIL {s}/{s}: syntax error {d}:{d}: {s}\n", .{ dir, file.name, diag.line, diag.column, diag.message });
-        return null;
+/// Loads, checks and runs a program, writing its output to `out`.
+fn run_program(alloc: std.mem.Allocator, name: []const u8, src: []const u8, out: *std.Io.Writer, max_call_depth: u32) !struct { Outcome, *modules.Program } {
+    const p = try modules.Program.create(alloc, io, out);
+    p.interpreter.options.max_call_depth = max_call_depth;
+    _ = p.load_root(name, src) catch |err| switch (err) {
+        error.SyntaxError, error.ImportFailed, error.AnalysisFailed => return .{ .failed_early, p },
+        else => return err,
     };
-    const expander = try alloc.create(macros.Expander);
-    expander.* = .init(alloc, out);
-    const program = analyzer.analyze(file.src, value, alloc, &diag, expander.options()) catch {
-        std.debug.print("FAIL {s}/{s}: {d}:{d}: {s}\n", .{ dir, file.name, diag.line, diag.column, diag.message });
-        return null;
+    p.check() catch |err| switch (err) {
+        error.TypeError => return .{ .failed_early, p },
+        else => return err,
     };
-    checker.check(file.src, program, alloc, &diag) catch {
-        std.debug.print("FAIL {s}/{s}: type error {d}:{d}: {s}\n", .{ dir, file.name, diag.line, diag.column, diag.message });
-        return null;
+    p.run() catch |err| switch (err) {
+        error.RuntimeError => return .{ .runtime_error, p },
+        else => return err,
     };
-    return .{ .program = program, .expander = expander };
+    return .{ .ok, p };
 }
 
 test "programs print the expected output" {
@@ -38,28 +32,20 @@ test "programs print the expected output" {
 
     var failures: usize = 0;
     for (try harness.juck_files(alloc, "tests/run")) |file| {
+        const stem = file.name[0 .. file.name.len - ".juck".len];
+        const expected = std.Io.Dir.cwd().readFileAlloc(io, try std.fmt.allocPrint(alloc, "tests/run/{s}.out", .{stem}), alloc, .limited(1 << 24)) catch {
+            std.debug.print("FAIL run/{s}: missing tests/run/{s}.out\n", .{ file.name, stem });
+            failures += 1;
+            continue;
+        };
+
         var output: std.Io.Writer.Allocating = .init(alloc);
-        const prepared = (try prepare(alloc, "run", file, &output.writer)) orelse {
+        const outcome, const p = try run_program(alloc, try std.fmt.allocPrint(alloc, "tests/run/{s}", .{file.name}), file.src, &output.writer, 10_000);
+        if (outcome != .ok) {
+            std.debug.print("FAIL run/{s}: {f}\n", .{ file.name, p.diag });
             failures += 1;
             continue;
-        };
-
-        const out_name = try std.fmt.allocPrint(alloc, "tests/run/{s}.out", .{file.name[0 .. file.name.len - ".juck".len]});
-        const expected = std.Io.Dir.cwd().readFileAlloc(io, out_name, alloc, .limited(1 << 24)) catch {
-            std.debug.print("FAIL run/{s}: missing {s}\n", .{ file.name, out_name });
-            failures += 1;
-            continue;
-        };
-
-        var diag: reader.Diagnostic = undefined;
-        interpreter.run(file.src, prepared.program, alloc, &output.writer, &diag, .{
-            .gensyms = &prepared.expander.gensyms,
-            .macros = prepared.expander.host(),
-        }) catch {
-            std.debug.print("FAIL run/{s}: runtime error {d}:{d}: {s}\n", .{ file.name, diag.line, diag.column, diag.message });
-            failures += 1;
-            continue;
-        };
+        }
         if (!std.mem.eql(u8, expected, output.written())) {
             std.debug.print("FAIL run/{s}: output differs\n--- expected\n{s}--- got\n{s}---\n", .{ file.name, expected, output.written() });
             failures += 1;
@@ -76,28 +62,24 @@ test "runtime errors are reported" {
     var failures: usize = 0;
     for (try harness.juck_files(alloc, "tests/runtime_errors")) |file| {
         var output: std.Io.Writer.Allocating = .init(alloc);
-        const prepared = (try prepare(alloc, "runtime_errors", file, &output.writer)) orelse {
-            failures += 1;
-            continue;
-        };
-
-        var diag: reader.Diagnostic = undefined;
         // A low limit keeps the deep-recursion test fast.
-        if (interpreter.run(file.src, prepared.program, alloc, &output.writer, &diag, .{
-            .max_call_depth = 1000,
-            .gensyms = &prepared.expander.gensyms,
-            .macros = prepared.expander.host(),
-        })) |_| {
-            std.debug.print("FAIL runtime_errors/{s}: ran without errors\n", .{file.name});
-            failures += 1;
-            continue;
-        } else |err| if (err != error.RuntimeError) return err;
-
-        if (harness.expectedError(file.src)) |want| {
-            if (want.line != diag.line or want.column != diag.column) {
-                std.debug.print("FAIL runtime_errors/{s}: expected error at {d}:{d}, got {d}:{d} ({s})\n", .{
-                    file.name, want.line, want.column, diag.line, diag.column, diag.message,
-                });
+        const outcome, const p = try run_program(alloc, try std.fmt.allocPrint(alloc, "tests/runtime_errors/{s}", .{file.name}), file.src, &output.writer, 1000);
+        switch (outcome) {
+            .runtime_error => {},
+            .ok => {
+                std.debug.print("FAIL runtime_errors/{s}: ran without errors\n", .{file.name});
+                failures += 1;
+                continue;
+            },
+            .failed_early => {
+                std.debug.print("FAIL runtime_errors/{s}: failed before running: {f}\n", .{ file.name, p.diag });
+                failures += 1;
+                continue;
+            },
+        }
+        if (harness.expected_error(file.src)) |want| {
+            if (want.line != p.diag.line or want.column != p.diag.column) {
+                std.debug.print("FAIL runtime_errors/{s}: expected error at {d}:{d}, got {f}\n", .{ file.name, want.line, want.column, p.diag });
                 failures += 1;
             }
         }

@@ -8,6 +8,7 @@ const interpreter = @import("interpreter");
 const Allocator = std.mem.Allocator;
 const Diagnostic = reader.Diagnostic;
 const Failure = analyzer.MacroHost.Failure;
+const no_sources: reader.Sources = .{};
 
 pub const Expander = struct {
     alloc: Allocator,
@@ -22,7 +23,7 @@ pub const Expander = struct {
     pub fn init(alloc: Allocator, out: *std.Io.Writer) Expander {
         return .{
             .alloc = alloc,
-            .checker = .{ .src = "", .alloc = alloc, .diag = null },
+            .checker = .{ .sources = &no_sources, .alloc = alloc, .diag = null },
             .interpreter = .{ .alloc = alloc, .out = out },
         };
     }
@@ -55,11 +56,11 @@ pub const Expander = struct {
     /// compiles it, as a function named like the macro, in the macro world.
     /// Defining a macro again replaces it; code already expanded keeps the
     /// old expansion.
-    fn define(ctx: *anyopaque, src: []const u8, m: *const ast.Macro, diag: *Diagnostic) Failure!void {
+    fn define(ctx: *anyopaque, sources: *const reader.Sources, m: *const ast.Macro, diag: *Diagnostic) Failure!void {
         const self: *Expander = @ptrCast(@alignCast(ctx));
         if (self.checker.globals.contains(m.name) and !self.macros.contains(m.name))
-            return self.fail(src, m.pos, diag, "\"{s}\" is already a comptime function", .{m.name});
-        try self.compile(src, .{ .pos = m.pos, .name = m.name, .doc = m.doc, .lambda = m.lambda }, diag);
+            return self.fail(sources, m.pos, diag, "\"{s}\" is already a comptime function", .{m.name});
+        try self.compile(sources, .{ .pos = m.pos, .name = m.name, .doc = m.doc, .lambda = m.lambda }, diag);
         const stored = try self.alloc.create(ast.Macro);
         stored.* = m.*;
         try self.macros.put(self.alloc, m.name, stored);
@@ -67,22 +68,22 @@ pub const Expander = struct {
 
     /// Compiles a comptime function into the macro world, so macros (and
     /// other comptime functions) can call it.
-    fn define_comptime(ctx: *anyopaque, src: []const u8, f: *const ast.Fn, diag: *Diagnostic) Failure!void {
+    fn define_comptime(ctx: *anyopaque, sources: *const reader.Sources, f: *const ast.Fn, diag: *Diagnostic) Failure!void {
         const self: *Expander = @ptrCast(@alignCast(ctx));
         if (self.macros.contains(f.name))
-            return self.fail(src, f.pos, diag, "\"{s}\" is already a macro", .{f.name});
-        try self.compile(src, f.*, diag);
+            return self.fail(sources, f.pos, diag, "\"{s}\" is already a macro", .{f.name});
+        try self.compile(sources, f.*, diag);
     }
 
     /// Checks and compiles a function in the macro world, replacing any
     /// earlier one with the same name.
-    fn compile(self: *Expander, src: []const u8, f: ast.Fn, diag: *Diagnostic) Failure!void {
+    fn compile(self: *Expander, sources: *const reader.Sources, f: ast.Fn, diag: *Diagnostic) Failure!void {
         const previous = self.checker.globals.get(f.name);
         _ = self.checker.globals.remove(f.name);
 
         const item = try self.alloc.create(ast.TopLevel);
         item.* = .{ .@"fn" = f };
-        _ = self.checker.check_form(src, item.*, diag) catch |err| switch (err) {
+        _ = self.checker.check_form(sources, item.*, diag) catch |err| switch (err) {
             error.TypeError => {
                 self.checker.restore(f.name, previous);
                 // The most likely mistake: using something that only exists
@@ -93,19 +94,19 @@ pub const Expander = struct {
             },
             error.OutOfMemory => return error.OutOfMemory,
         };
-        _ = self.interpreter.run_form(src, item, diag) catch |err| switch (err) {
+        _ = self.interpreter.run_form(sources, item, diag) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.MacroFailed, // defining a function can't fail otherwise
         };
     }
 
-    fn fail(self: *Expander, src: []const u8, pos: u32, diag: *Diagnostic, comptime fmt: []const u8, args: anytype) Failure {
-        diag.* = analyzer.diagnostic_at(src, pos, try std.fmt.allocPrint(self.alloc, fmt, args));
+    fn fail(self: *Expander, sources: *const reader.Sources, pos: u32, diag: *Diagnostic, comptime fmt: []const u8, args: anytype) Failure {
+        diag.* = sources.diagnostic(pos, try std.fmt.allocPrint(self.alloc, fmt, args));
         return error.MacroFailed;
     }
 
     /// Runs a macro on a call's arguments.
-    fn expand(ctx: *anyopaque, src: []const u8, name: []const u8, pos: u32, args: []const reader.Value, diag: *Diagnostic) Failure!reader.Value {
+    fn expand(ctx: *anyopaque, sources: *const reader.Sources, name: []const u8, pos: u32, args: []const reader.Value, diag: *Diagnostic) Failure!reader.Value {
         const self: *Expander = @ptrCast(@alignCast(ctx));
         const m = self.macros.get(name).?;
 
@@ -115,8 +116,16 @@ pub const Expander = struct {
                 try std.fmt.allocPrint(self.alloc, "at least {d}", .{fixed})
             else
                 try std.fmt.allocPrint(self.alloc, "{d}", .{fixed});
-            const message = try std.fmt.allocPrint(self.alloc, "the macro \"{s}\" takes {s} argument(s), but {d} were given", .{ name, expected, args.len });
-            diag.* = analyzer.diagnostic_at(src, pos, message);
+            const message = try std.fmt.allocPrint(
+                self.alloc,
+                "the macro \"{s}\" takes {s} argument(s), but {d} were given",
+                .{
+                    name,
+                    expected,
+                    args.len,
+                },
+            );
+            diag.* = sources.diagnostic(pos, message);
             return error.MacroFailed;
         }
 
@@ -128,7 +137,7 @@ pub const Expander = struct {
         } };
 
         const f = self.interpreter.globals.get(name).?.func;
-        const result = self.interpreter.apply(src, f, values, pos, diag) catch |err| switch (err) {
+        const result = self.interpreter.apply(sources, f, values, pos, diag) catch |err| switch (err) {
             error.RuntimeError => {
                 diag.message = try std.fmt.allocPrint(self.alloc, "in the expansion of \"{s}\": {s}", .{ name, diag.message });
                 return error.MacroFailed;

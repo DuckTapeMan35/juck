@@ -1,0 +1,18 @@
+// A module for the import tests.
+[
+  ["fn", {"name": "double", "params": [["n", "i64"]], "returns": "i64", "pub": true}, ["*", "n", 2]],
+  ["fn", {"name": "hidden", "params": [], "returns": "i64"}, 42],
+  ["fn", {"name": "answer", "params": [], "returns": "i64", "pub": true}, ["hidden"]],
+  ["fn", {"name": "offset", "params": [], "returns": "i64", "pub": true}, 42],
+  ["def", {"name": "base", "type": "i64", "pub": true}, 100],
+  ["print", {"str": "math loaded"}],
+
+  // The macro's `offset` means this module's function, even when the
+  // macro is used in a module that has its own `offset`.
+  ["macro", {"name": "plus-offset", "params": ["e"], "pub": true},
+    ["template", ["+", ["offset"], ["insert", "e"]]]],
+
+  // An expansion can only use what this module makes pub.
+  ["macro", {"name": "leaky", "params": [], "pub": true},
+    ["template", ["hidden"]]],
+]

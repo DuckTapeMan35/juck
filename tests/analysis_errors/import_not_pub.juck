@@ -1,0 +1,2 @@
+// error: 2:42
+[["import", "math", "../modules/math"], ["math.hidden"]]

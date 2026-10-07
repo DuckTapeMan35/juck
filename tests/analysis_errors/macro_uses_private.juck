@@ -1,0 +1,2 @@
+// error: 17:19
+[["import", "math", "../modules/math"], ["math.leaky"]]

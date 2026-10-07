@@ -197,6 +197,32 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    // The standard library, embedded in the binary: std/NAME.juck is the
+    // module "std/NAME". Add new modules to this list.
+    const std_modules = [_][]const u8{"logic"};
+    const stdlib_files = b.addWriteFiles();
+    var stdlib_src: std.ArrayList(u8) = .empty;
+    stdlib_src.appendSlice(
+        b.allocator,
+        "const std = @import(\"std\");\n\n/// The source of a standard library module, by path (\"std/logic\").\npub fn get(path: []const u8) ?[]const u8 {\n",
+    ) catch @panic("OOM");
+    for (std_modules) |name| {
+        const file = b.fmt("{s}.juck", .{name});
+        _ = stdlib_files.addCopyFile(b.path(b.fmt("std/{s}", .{file})), file);
+        stdlib_src.appendSlice(
+            b.allocator,
+            b.fmt(
+                "    if (std.mem.eql(u8, path, \"std/{s}\")) return @embedFile(\"{s}\");\n",
+                .{ name, file },
+            ),
+        ) catch @panic("OOM");
+    }
+    stdlib_src.appendSlice(b.allocator, "    return null;\n}\n") catch @panic("OOM");
+    const stdlib_mod = b.createModule(.{
+        .root_source_file = stdlib_files.add("stdlib.zig", stdlib_src.items),
+        .target = target,
+    });
+
     const macros_mod = b.createModule(.{
         .root_source_file = b.path("src/macros.zig"),
         .target = target,
@@ -219,6 +245,22 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    const modules_mod = b.createModule(.{
+        .root_source_file = b.path("src/modules.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "reader", .module = reader_mod },
+            .{ .name = "ast", .module = ast_mod },
+            .{ .name = "analyzer", .module = analyzer_mod },
+            .{ .name = "checker", .module = checker_mod },
+            .{ .name = "interpreter", .module = interpreter_mod },
+            .{ .name = "macros", .module = macros_mod },
+            .{ .name = "stdlib", .module = stdlib_mod },
+            .{ .name = "unparse", .module = unparse_mod },
+            .{ .name = "builtins", .module = builtins_mod },
+        },
+    });
+
     const repl_mod = b.createModule(.{
         .root_source_file = b.path("src/repl.zig"),
         .target = target,
@@ -231,6 +273,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "macros", .module = macros_mod },
             .{ .name = "unparse", .module = unparse_mod },
             .{ .name = "printer", .module = printer_mod },
+            .{ .name = "modules", .module = modules_mod },
         },
     });
 
@@ -283,8 +326,10 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addImport("checker", checker_mod);
     exe.root_module.addImport("interpreter", interpreter_mod);
     exe.root_module.addImport("repl", repl_mod);
+    exe.root_module.addImport("stdlib", stdlib_mod);
     exe.root_module.addImport("macros", macros_mod);
     exe.root_module.addImport("unparse", unparse_mod);
+    exe.root_module.addImport("modules", modules_mod);
 
     // This declares intent for the executable to be installed into the
     // install prefix when running `zig build` (i.e. when executing the default
@@ -366,6 +411,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "harness", .module = harness_mod },
                 .{ .name = "checker", .module = checker_mod },
                 .{ .name = "macros", .module = macros_mod },
+                .{ .name = "modules", .module = modules_mod },
             },
         }),
     });
@@ -383,6 +429,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "analyzer", .module = analyzer_mod },
                 .{ .name = "checker", .module = checker_mod },
                 .{ .name = "interpreter", .module = interpreter_mod },
+                .{ .name = "modules", .module = modules_mod },
             },
         }),
     });

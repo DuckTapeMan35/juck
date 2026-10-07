@@ -1,0 +1,29 @@
+// std/logic: control flow that doesn't need to be built into the language.
+[
+  ["macro", {"name": "and", "params": ["a", "b"], "pub": true,
+             "doc": "true if both are true; b is only evaluated if a is true."},
+    ["template", ["if", ["insert", "a"], ["insert", "b"], false]]],
+
+  ["macro", {"name": "or", "params": ["a", "b"], "pub": true,
+             "doc": "true if either is true; b is only evaluated if a is false."},
+    ["template", ["if", ["insert", "a"], true, ["insert", "b"]]]],
+
+  ["macro", {"name": "unless", "params": ["cond", "then", "else"], "pub": true},
+    ["template", ["if", ["not", ["insert", "cond"]], ["insert", "then"], ["insert", "else"]]]],
+
+  ["macro", {"name": "when", "params": ["cond"], "rest": "body", "pub": true,
+             "doc": "Evaluates body if cond is true; the result is null."},
+    ["template", ["if", ["insert", "cond"], ["do", ["splice", "body"], null], null]]],
+
+  // cond: [test, value, test, value, ..., default]
+  ["fn", {"name": "cond-code", "params": [["first", "data"], ["more", "data"]], "returns": "data", "comptime": true},
+    ["if", ["=", ["data-len", "more"], 0],
+      "first",
+      ["template", ["if", ["insert", "first"], ["insert", ["data-get", "more", 0]],
+        ["insert", ["cond-code",
+          ["data-get", "more", 1],
+          ["data-slice", "more", 2, ["data-len", "more"]]]]]]]],
+  ["macro", {"name": "cond", "params": ["first"], "rest": "more", "pub": true,
+             "doc": "[\"cond\", test, value, test, value, ..., default]"},
+    ["cond-code", "first", "more"]],
+]

@@ -3,11 +3,10 @@ const Io = std.Io;
 const reader = @import("reader");
 const ast = @import("ast");
 const analyzer = @import("analyzer");
-const checker = @import("checker");
 const interpreter = @import("interpreter");
-const macros = @import("macros");
 const printer = @import("printer");
 const unparse = @import("unparse");
+const modules = @import("modules");
 
 const Allocator = std.mem.Allocator;
 const Writer = Io.Writer;
@@ -25,22 +24,18 @@ const help =
 ;
 
 /// A file to load before the first prompt.
-pub const File = struct { src: []const u8, program: reader.Value };
+pub const File = struct { name: []const u8, src: []const u8 };
 
 pub fn run(io: Io, alloc: Allocator, out: *Writer, file: ?File) !void {
-    var repl: Repl = .{
-        .alloc = alloc,
-        .out = out,
-        .checker = .{ .src = "", .alloc = alloc, .diag = null },
-        .interpreter = .{ .alloc = alloc, .out = out },
-        .expander = .init(alloc, out),
-    };
-    repl.interpreter.options.gensyms = &repl.expander.gensyms;
-    repl.interpreter.options.macros = repl.expander.host();
-
+    const program = try modules.Program.create(alloc, io, out);
     if (file) |f| {
-        if (!try repl.load(f)) return error.InvalidInput;
+        _ = program.load_root(f.name, f.src) catch |err| return fail(program, err);
+        program.check() catch |err| return fail(program, err);
+        program.run() catch |err| return fail(program, err);
+    } else {
+        _ = try program.empty_root();
     }
+    var repl: Repl = .{ .alloc = alloc, .out = out, .program = program };
 
     try out.writeAll("juck REPL; :help for help, :quit to leave\n");
 
@@ -51,7 +46,7 @@ pub fn run(io: Io, alloc: Allocator, out: *Writer, file: ?File) !void {
     var pending: std.ArrayList(u8) = .empty;
     while (true) {
         if (pending.items.len == 0) {
-            try out.print("juck[{d}]> ", .{repl.entries.items.len});
+            try out.print("juck[{d}]> ", .{repl.count});
         } else {
             try out.writeAll("   ...> ");
         }
@@ -66,11 +61,12 @@ pub fn run(io: Io, alloc: Allocator, out: *Writer, file: ?File) !void {
                 if (eql(trimmed, ":quit") or eql(trimmed, ":q")) break;
                 if (eql(trimmed, ":help") or eql(trimmed, ":h")) {
                     try out.writeAll(help);
-                } else if (std.mem.startsWith(u8, trimmed, ":expand")) {
-                    try repl.show_expansion(try alloc.dupe(u8, trimmed[":expand".len..]));
+                } else if (std.mem.startsWith(u8, trimmed, ":expand ")) {
+                    try repl.eval(try alloc.dupe(u8, trimmed[":expand ".len..]), .expand);
                 } else {
                     try out.print("unknown command {s}; try :help\n", .{trimmed});
                 }
+                try out.flush();
                 continue;
             }
         }
@@ -81,96 +77,80 @@ pub fn run(io: Io, alloc: Allocator, out: *Writer, file: ?File) !void {
 
         const entry = try alloc.dupe(u8, pending.items);
         pending.clearRetainingCapacity();
-        try repl.eval(entry);
+        try repl.eval(entry, .run);
         try out.flush();
     }
     try out.writeAll("\n");
 }
 
+fn fail(program: *modules.Program, err: anyerror) anyerror {
+    switch (err) {
+        error.SyntaxError, error.ImportFailed, error.AnalysisFailed, error.TypeError, error.RuntimeError => {
+            std.debug.print("{f}\n", .{program.diag});
+            return error.Reported;
+        },
+        else => return err,
+    }
+}
+
 const Repl = struct {
     alloc: Allocator,
     out: *Writer,
-    checker: checker.Session,
-    interpreter: interpreter.Session,
-    expander: macros.Expander,
+    program: *modules.Program,
+    /// How many inputs there have been; input N is named [N] in errors.
+    count: u32 = 0,
 
-    /// Everything entered so far, one entry after another. Positions in
-    /// the AST are offsets into this text, so errors can be traced back to
-    /// the entry they came from, even when they happen later (an error in
-    /// a function defined three inputs ago)
-    text: std.ArrayList(u8) = .empty,
-    /// The line of text each entry starts on
-    entries: std.ArrayList(u32) = .empty,
+    fn eval(self: *Repl, entry: []const u8, mode: enum { run, expand }) !void {
+        const p = self.program;
+        const name = try std.fmt.allocPrint(self.alloc, "[{d}]", .{self.count});
+        self.count += 1;
+        const offset = try p.add_input(name, entry);
 
-    /// Loads a file's program. Returns false if it failed.
-    fn load(self: *Repl, f: File) !bool {
-        _ = try self.add_entry(f.src);
-        var diag: reader.Diagnostic = undefined;
-        const program = analyzer.analyze(self.text.items, f.program, self.alloc, &diag, self.expander.options()) catch |err| {
-            if (err != error.AnalysisFailed) return err;
-            try self.report(diag);
-            return false;
-        };
-        self.checker.check_program(self.text.items, program, &diag) catch |err| {
-            if (err != error.TypeError) return err;
-            try self.report(diag);
-            return false;
-        };
-        self.interpreter.run_program(self.text.items, program, &diag) catch |err| {
-            if (err != error.RuntimeError) return err;
-            try self.report(diag);
-            return false;
-        };
-        return true;
-    }
-
-    /// Appends src to the session text, returning its offset.
-    fn add_entry(self: *Repl, src: []const u8) !u32 {
-        const offset: u32 = @intCast(self.text.items.len);
-        try self.entries.append(self.alloc, @intCast(std.mem.count(u8, self.text.items, "\n") + 1));
-        try self.text.appendSlice(self.alloc, src);
-        if (src.len == 0 or src[src.len - 1] != '\n') try self.text.append(self.alloc, '\n');
-        return offset;
-    }
-
-    fn eval(self: *Repl, entry: []const u8) !void {
-        const offset = try self.add_entry(entry);
-        var diag: reader.Diagnostic = undefined;
-
-        const value = reader.read_at(entry, offset, self.alloc, &diag) catch |err| {
+        const value = reader.read_at(entry, offset, self.alloc, &p.diag) catch |err| {
             if (err != error.InvalidInput) return err;
-            // The reader reports positions relative to the entry itself
-            return self.out.print("error at {d}:{d}: {s}\n", .{ diag.line, diag.column, diag.message });
+            p.diag.file = name;
+            return self.report(name);
+        };
+
+        p.import_into_root(value) catch |err| switch (err) {
+            error.ImportFailed, error.SyntaxError, error.AnalysisFailed => return self.report(name),
+            else => return err,
         };
 
         const item = try self.alloc.create(ast.TopLevel);
-        item.* = analyzer.analyze_form(self.text.items, value, self.alloc, &diag, self.expander.options()) catch |err| {
+        item.* = analyzer.analyze_form(&p.sources, value, self.alloc, &p.diag, p.options()) catch |err| {
             if (err != error.AnalysisFailed) return err;
-            return self.report(diag);
+            return self.report(name);
         };
+
+        if (mode == .expand) {
+            try printer.write_json_value(self.out, try unparse.top_level(self.alloc, item.*, try p.root_aliases()));
+            return self.out.writeByte('\n');
+        }
 
         // What the name meant before, in case running the new definition
         // fails and it has to be undone.
-        const name: ?[]const u8 = switch (item.*) {
+        const defined: ?[]const u8 = switch (item.*) {
             .def => |d| d.name,
             .@"fn" => |f| f.name,
             .macro => |m| m.name,
-            .expr => null,
+            .import, .expr => null,
         };
-        const previous = if (name) |n| self.checker.globals.get(n) else null;
+        const previous = if (defined) |n| p.checker.globals.get(n) else null;
 
-        const t = self.checker.check_form(self.text.items, item.*, &diag) catch |err| {
+        const t = p.checker.check_form(&p.sources, item.*, &p.diag) catch |err| {
             if (err != error.TypeError) return err;
-            return self.report(diag);
+            return self.report(name);
         };
 
-        const result = self.interpreter.run_form(self.text.items, item, &diag) catch |err| {
+        const result = p.interpreter.run_form(&p.sources, item, &p.diag) catch |err| {
             if (err != error.RuntimeError) return err;
-            if (name) |n| self.checker.restore(n, previous);
-            return self.report(diag);
+            if (defined) |n| p.checker.restore(n, previous);
+            return self.report(name);
         };
 
-        // Show the value of an expression, unless it's null (like the result of print)
+        // Show the value of an expression, unless it's null (like the
+        // result of print).
         const v = result orelse return;
         const ty = t.?;
         if (ty == .null) return;
@@ -179,33 +159,15 @@ const Repl = struct {
         try self.out.writeByte('\n');
     }
 
-    /// :expand FORM: analyzes FORM, expanding macros, and shows the
-    /// result as code, without checking or running it.
-    fn show_expansion(self: *Repl, entry: []const u8) !void {
-        const offset = try self.add_entry(entry);
-        var diag: reader.Diagnostic = undefined;
-        const value = reader.read_at(entry, offset, self.alloc, &diag) catch |err| {
-            if (err != error.InvalidInput) return err;
-            return self.out.print("error at {d}:{d}: {s}\n", .{ diag.line, diag.column, diag.message });
-        };
-        const item = analyzer.analyze_form(self.text.items, value, self.alloc, &diag, self.expander.options()) catch |err| {
-            if (err != error.AnalysisFailed) return err;
-            return self.report(diag);
-        };
-        try printer.write_json_value(self.out, try unparse.top_level(self.alloc, item));
-        try self.out.writeByte('\n');
-    }
-
-    /// Reports an error whose line counts from the start of the session
-    /// text, as a line within the entry it belongs to
-    fn report(self: *Repl, d: reader.Diagnostic) !void {
-        var i = self.entries.items.len - 1;
-        while (i > 0 and self.entries.items[i] > d.line) i -= 1;
-        const line = d.line - self.entries.items[i] + 1;
-        if (i == self.entries.items.len - 1) {
-            try self.out.print("error at {d}:{d}: {s}\n", .{ line, d.column, d.message });
+    /// Reports the program's last error. Errors in the current input are
+    /// shown without its name; errors elsewhere (an earlier input, or an
+    /// imported module) say where they are.
+    fn report(self: *Repl, current: []const u8) !void {
+        const d = self.program.diag;
+        if (eql(d.file, current)) {
+            try self.out.print("error at {d}:{d}: {s}\n", .{ d.line, d.column, d.message });
         } else {
-            try self.out.print("error in [{d}] at {d}:{d}: {s}\n", .{ i, line, d.column, d.message });
+            try self.out.print("error in {f}\n", .{d});
         }
     }
 };

@@ -1,0 +1,21 @@
+// Imports: hoisted, qualified access, pub, macros from other modules.
+[
+  // Used before the import line: imports are hoisted.
+  ["print", ["math.double", 21]],
+  ["import", "math", "../modules/math"],
+  ["import", "logic", "std/logic"],
+
+  ["print", ["math.answer"]],
+  ["print", "math.base"],
+  ["print", ["math.plus-offset", 1]],
+
+  // This module's own `offset` doesn't change what the macro's means.
+  ["fn", {"name": "offset", "params": [], "returns": "i64"}, 7],
+  ["print", ["math.plus-offset", ["offset"]]],
+
+  ["print", ["logic.and", true, ["logic.or", false, true]]],
+  ["print", ["logic.and", false, ["=", ["/", 1, 0], 0]]],
+  ["print", ["logic.cond", false, 1, true, 2, 3]],
+  ["logic.when", true, ["print", {"str": "when"}]],
+  ["print", ["logic.unless", false, 1, 2]],
+]

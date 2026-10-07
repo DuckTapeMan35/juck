@@ -1,0 +1,2 @@
+// error: 2:9
+[["do", ["import", "m", "std/logic"]]]

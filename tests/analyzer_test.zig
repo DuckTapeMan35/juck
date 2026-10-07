@@ -1,105 +1,63 @@
 const std = @import("std");
-const reader = @import("reader");
-const analyzer = @import("analyzer");
-const harness = @import("harness");
-const checker = @import("checker");
-const macros = @import("macros");
+const modules = @import("modules");
+const harness = @import("harness.zig");
 
-test "programs analyze" {
+const Stage = enum { analysis, checking, none };
+
+/// Loads and checks `file`; returns the stage that failed, if any.
+fn run_stages(alloc: std.mem.Allocator, path: []const u8, file: harness.File, program: **modules.Program) !Stage {
+    var output: std.Io.Writer.Allocating = .init(alloc); // `print` in macro bodies
+    const p = try modules.Program.create(alloc, std.testing.io, &output.writer);
+    program.* = p;
+    _ = p.load_root(try std.fmt.allocPrint(alloc, "{s}/{s}", .{ path, file.name }), file.src) catch |err| switch (err) {
+        error.SyntaxError, error.ImportFailed, error.AnalysisFailed => return .analysis,
+        else => return err,
+    };
+    p.check() catch |err| switch (err) {
+        error.TypeError => return .checking,
+        else => return err,
+    };
+    return .none;
+}
+
+fn expect_stage(dir: []const u8, expected: Stage) !void {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
 
     var failures: usize = 0;
-    var discard: std.Io.Writer.Allocating = .init(alloc);
-    for (try harness.juck_files(alloc, "tests/programs")) |file| {
-        var diag: reader.Diagnostic = undefined;
-        const value = reader.read(file.src, alloc, &diag) catch {
-            std.debug.print("FAIL programs/{s}: syntax error {d}:{d}: {s}\n", .{ file.name, diag.line, diag.column, diag.message });
+    const path = try std.fmt.allocPrint(alloc, "tests/{s}", .{dir});
+    for (try harness.juck_files(alloc, path)) |file| {
+        var program: *modules.Program = undefined;
+        const failed = try run_stages(alloc, path, file, &program);
+        const d = program.diag;
+        if (failed != expected) {
+            if (failed == .none) {
+                std.debug.print("FAIL {s}/{s}: no error\n", .{ dir, file.name });
+            } else {
+                std.debug.print("FAIL {s}/{s}: failed in {t}, not {t}: {f}\n", .{ dir, file.name, failed, expected, d });
+            }
             failures += 1;
             continue;
-        };
-        var expander = macros.Expander.init(alloc, &discard.writer);
-        const analyzed = analyzer.analyze(file.src, value, alloc, &diag, expander.options()) catch {
-            std.debug.print("FAIL programs/{s}: {d}:{d}: {s}\n", .{ file.name, diag.line, diag.column, diag.message });
-            failures += 1;
-            continue;
-        };
-        checker.check(file.src, analyzed, alloc, &diag) catch {
-            std.debug.print("FAIL programs/{s}: type error {d}:{d}: {s}\n", .{ file.name, diag.line, diag.column, diag.message });
-            failures += 1;
-        };
+        }
+        if (harness.expected_error(file.src)) |want| {
+            if (want.line != d.line or want.column != d.column) {
+                std.debug.print("FAIL {s}/{s}: expected error at {d}:{d}, got {f}\n", .{ dir, file.name, want.line, want.column, d });
+                failures += 1;
+            }
+        }
     }
     try std.testing.expectEqual(0, failures);
+}
+
+test "programs analyze and type check" {
+    try expect_stage("programs", .none);
 }
 
 test "analysis errors are reported" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-
-    var failures: usize = 0;
-    var discard: std.Io.Writer.Allocating = .init(alloc);
-    for (try harness.juck_files(alloc, "tests/analysis_errors")) |file| {
-        var diag: reader.Diagnostic = undefined;
-        const value = reader.read(file.src, alloc, &diag) catch {
-            std.debug.print("FAIL analysis_errors/{s}: is a syntax error ({d}:{d}: {s}), not an analysis error\n", .{ file.name, diag.line, diag.column, diag.message });
-            failures += 1;
-            continue;
-        };
-        var expander = macros.Expander.init(alloc, &discard.writer);
-        if (analyzer.analyze(file.src, value, alloc, &diag, expander.options())) |_| {
-            std.debug.print("FAIL analysis_errors/{s}: analyzed without errors\n", .{file.name});
-            failures += 1;
-            continue;
-        } else |_| {}
-
-        if (harness.expected_error(file.src)) |want| {
-            if (want.line != diag.line or want.column != diag.column) {
-                std.debug.print("FAIL analysis_errors/{s}: expected error at {d}:{d}, got {d}:{d} ({s})\n", .{
-                    file.name, want.line, want.column, diag.line, diag.column, diag.message,
-                });
-                failures += 1;
-            }
-        }
-    }
-    try std.testing.expectEqual(0, failures);
+    try expect_stage("analysis_errors", .analysis);
 }
 
 test "type errors are reported" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-
-    var failures: usize = 0;
-    var discard: std.Io.Writer.Allocating = .init(alloc);
-    for (try harness.juck_files(alloc, "tests/type_errors")) |file| {
-        var diag: reader.Diagnostic = undefined;
-        const value = reader.read(file.src, alloc, &diag) catch {
-            std.debug.print("FAIL type_errors/{s}: is a syntax error ({d}:{d}: {s})\n", .{ file.name, diag.line, diag.column, diag.message });
-            failures += 1;
-            continue;
-        };
-        var expander = macros.Expander.init(alloc, &discard.writer);
-        const analyzed = analyzer.analyze(file.src, value, alloc, &diag, expander.options()) catch {
-            std.debug.print("FAIL type_errors/{s}: fails pass 1 ({d}:{d}: {s}), not type checking\n", .{ file.name, diag.line, diag.column, diag.message });
-            failures += 1;
-            continue;
-        };
-        if (checker.check(file.src, analyzed, alloc, &diag)) |_| {
-            std.debug.print("FAIL type_errors/{s}: type checked without errors\n", .{file.name});
-            failures += 1;
-            continue;
-        } else |_| {}
-
-        if (harness.expected_error(file.src)) |want| {
-            if (want.line != diag.line or want.column != diag.column) {
-                std.debug.print("FAIL type_errors/{s}: expected error at {d}:{d}, got {d}:{d} ({s})\n", .{
-                    file.name, want.line, want.column, diag.line, diag.column, diag.message,
-                });
-                failures += 1;
-            }
-        }
-    }
-    try std.testing.expectEqual(0, failures);
+    try expect_stage("type_errors", .checking);
 }

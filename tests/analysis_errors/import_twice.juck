@@ -1,0 +1,2 @@
+// error: 2:38
+[["import", "m", "../modules/math"], ["import", "m", "std/logic"]]

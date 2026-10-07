@@ -3,12 +3,10 @@ const Io = std.Io;
 const lexer = @import("lexer");
 const reader = @import("reader");
 const printer = @import("printer");
-const analyzer = @import("analyzer");
-const checker = @import("checker");
-const interpreter = @import("interpreter");
 const repl = @import("repl");
-const macros = @import("macros");
 const unparse = @import("unparse");
+const modules = @import("modules");
+const stdlib = @import("stdlib");
 
 const usage =
     \\usage: juck [<file>] [--repl | --check | --tokens | --ast | --json]
@@ -63,48 +61,68 @@ fn main_impl(init: std.process.Init) !void {
         return error.InvalidArgs;
     };
 
-    const src = try Io.Dir.cwd().readFileAlloc(init.io, file, alloc, .limited(16 * 1024 * 1024));
+    const src = try read_source(init.io, alloc, file);
 
     if (mode == .tokens) {
-        // lex() consumes the slice it's given, so hand it a copy of the slice
-        // (not of the bytes); src itself stays intact.
-        var rest = src;
+        // lex() consumes the slice it's given and needs it mutable, so
+        // hand it a copy (the source may be an embedded std module).
+        var rest = try alloc.dupe(u8, src);
         const tokens = try lexer.lex(&rest, alloc);
         for (tokens) |t| try out.print("{f}\n", .{t});
         return;
     }
 
-    const program = try reader.read(src, alloc, null);
-    var expander = macros.Expander.init(alloc, out);
     switch (mode) {
-        .run, .check => {
-            const analyzed = try analyzer.analyze(src, program, alloc, null, expander.options());
-            try checker.check(src, analyzed, alloc, null);
-            if (mode == .run) try interpreter.run(src, analyzed, alloc, out, null, .{
-                .gensyms = &expander.gensyms,
-                .macros = expander.host(),
-            });
-        },
-        .expand => {
-            // Output from `print` in macro bodies goes to stderr, so stdout
-            // is only the expanded program.
+        .run, .check, .expand => {
+            // In --expand, output from print in macro bodies goes to
+            // stderr, so stdout is only the expanded program.
             var stderr_buf: [4096]u8 = undefined;
             var stderr_writer = Io.File.stderr().writer(init.io, &stderr_buf);
             defer stderr_writer.interface.flush() catch {};
-            expander = macros.Expander.init(alloc, &stderr_writer.interface);
-            const analyzed = try analyzer.analyze(src, program, alloc, null, expander.options());
-            try printer.write_json(out, try unparse.program(alloc, analyzed));
+            const program = try modules.Program.create(alloc, init.io, if (mode == .expand) &stderr_writer.interface else out);
+
+            const root = program.load_root(file, src) catch |err| return report(program, err);
+            if (mode == .expand) {
+                return printer.write_json(out, try unparse.program(alloc, root.program, try program.root_aliases()));
+            }
+            program.check() catch |err| return report(program, err);
+            if (mode == .run) program.run() catch |err| return report(program, err);
         },
-        .repl => try repl.run(init.io, alloc, out, .{ .src = src, .program = program }),
+        .repl => try repl.run(init.io, alloc, out, .{ .name = file, .src = src }),
         .tokens => {},
-        .ast => try printer.write_tree(out, program, 0),
-        .json => try printer.write_json(out, program),
+        .ast => try printer.write_tree(out, try reader.read(src, alloc, null), 0),
+        .json => try printer.write_json(out, try reader.read(src, alloc, null)),
+    }
+}
+
+/// The contents of a file, or of a standard library module: std/logic
+/// (with or without .juck) is the embedded module, unless a file by that name exists
+fn read_source(io: Io, alloc: std.mem.Allocator, file: []const u8) ![]const u8 {
+    return Io.Dir.cwd().readFileAlloc(io, file, alloc, .limited(16 * 1024 * 1024)) catch |err| {
+        if (err == error.FileNotFound and std.mem.startsWith(u8, file, "std/")) {
+            const path = if (std.mem.endsWith(u8, file, ".juck")) file[0 .. file.len - ".juck".len] else file;
+            if (stdlib.get(path)) |embedded| return embedded;
+        }
+        return err;
+    };
+}
+
+/// Prints a program's error, if it is one juck reports, and returns
+/// error.Reported so main exits without printing it again. (Returning,
+/// instead of exiting here, lets the program's output be flushed first.)
+fn report(program: *modules.Program, err: anyerror) anyerror {
+    switch (err) {
+        error.SyntaxError, error.ImportFailed, error.AnalysisFailed, error.TypeError, error.RuntimeError => {
+            std.debug.print("{f}\n", .{program.diag});
+            return error.Reported;
+        },
+        else => return err,
     }
 }
 
 pub fn main(init: std.process.Init) !void {
     main_impl(init) catch |err| {
-        std.debug.print("Fatal error: {}\n", .{err});
+        if (err != error.Reported) std.debug.print("Fatal error: {}\n", .{err});
         std.process.exit(1);
     };
 }
