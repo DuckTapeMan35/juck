@@ -1,0 +1,2 @@
+// error: 2:128
+[["def", {"name": "x", "type": "data"}, ["data", 1]], ["fn", {"name": "f", "params": [], "returns": "data", "comptime": true}, "x"]]

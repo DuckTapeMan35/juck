@@ -1,0 +1,21 @@
+// Functions marked "comptime": true can be called by macros at compile
+// time, and by the program at runtime like any other function.
+[
+  ["fn", {"name": "twice-code", "params": [["e", "data"]], "returns": "data", "comptime": true},
+    ["template", ["+", ["insert", "e"], ["insert", "e"]]]],
+
+  ["macro", {"name": "double", "params": ["e"]}, ["twice-code", "e"]],
+  ["print", ["double", 21]],
+
+  // still an ordinary function at runtime
+  ["print", ["twice-code", ["data", "x"]]],
+
+  // comptime functions can recurse, and call other comptime functions
+  ["fn", {"name": "sum-code", "params": [["xs", "data"]], "returns": "data", "comptime": true},
+    ["if", ["=", ["data-len", "xs"], 0],
+      ["data", 0],
+      ["template", ["+", ["insert", ["data-get", "xs", 0]],
+                         ["insert", ["sum-code", ["data-slice", "xs", 1, ["data-len", "xs"]]]]]]]],
+  ["macro", {"name": "sum", "params": [], "rest": "xs"}, ["sum-code", "xs"]],
+  ["print", ["sum", 1, 2, 3, 4]],
+]

@@ -9,18 +9,72 @@ const Allocator = std.mem.Allocator;
 pub const Error = error{AnalysisFailed} || Allocator.Error;
 
 /// Names of special forms. They are reserved: they can't be used as names or as values
-pub const special_forms = [_][]const u8{ "def", "fn", "lambda", "type", "if", "let", "do", "data", "template", "insert", "splice" };
+pub const special_forms = [_][]const u8{ "def", "fn", "lambda", "macro", "type", "if", "let", "do", "data", "template", "insert", "splice" };
 
-/// Analyzes a whole program. On an error, fills diag if given,
-/// otherwise prints it. All memory comes from alloc (meant to be an arena)
-pub fn analyze(src: []const u8, program: Value, alloc: Allocator, diag: ?*Diagnostic) Error!ast.Program {
-    var a: Analyzer = .{ .src = src, .alloc = alloc, .diag = diag };
+/// Maximum depth of macro expansions inside each other (a macro whose
+/// expansion contains a macro call, and so on) before giving up.
+pub const max_expansion_depth = 1000;
+
+pub const Options = struct {
+    /// Where macros are defined and run. Without it, macro forms are an
+    /// error and no names are macros.
+    macros: ?MacroHost = null,
+    /// The names gensym generated. Names containing # are only accepted
+    /// if they are in here.
+    gensyms: ?*const Gensyms = null,
+};
+
+/// Runs macros for the analyzer. The analyzer can't run code itself (the
+/// interpreter depends on the analyzer, not the other way around), so it
+/// calls out through this interface; see the macros module.
+pub const MacroHost = struct {
+    ctx: *anyopaque,
+    vtable: *const VTable,
+
+    pub const Failure = error{MacroFailed} || Allocator.Error;
+
+    pub const VTable = struct {
+        is_macro: *const fn (ctx: *anyopaque, name: []const u8) bool,
+        /// Checks and compiles a macro definition. On failure, fills diag
+        define: *const fn (ctx: *anyopaque, src: []const u8, m: *const ast.Macro, diag: *Diagnostic) Failure!void,
+        /// Calls a macro with its (unevaluated) arguments, returning the
+        /// code it expands to. On failure, fills diag
+        expand: *const fn (ctx: *anyopaque, src: []const u8, name: []const u8, pos: u32, args: []const Value, diag: *Diagnostic) Failure!Value,
+        /// Checks and compiles a comptime function, so macros can call
+        /// it. On failure, fills diag.
+        define_comptime: *const fn (ctx: *anyopaque, src: []const u8, f: *const ast.Fn, diag: *Diagnostic) Failure!void,
+    };
+};
+
+/// Generated names: tmp#1, tmp#2, ... Names containing # can't be
+/// written by hand, so a generated name can't collide with any other.
+pub const Gensyms = struct {
+    count: u64 = 0,
+    names: std.StringHashMapUnmanaged(void) = .empty,
+
+    /// A new name, `base#N`, never returned before.
+    pub fn fresh(self: *Gensyms, alloc: Allocator, base: []const u8) Allocator.Error![]const u8 {
+        self.count += 1;
+        const n = try std.fmt.allocPrint(alloc, "{s}#{d}", .{ base, self.count });
+        try self.names.put(alloc, n, {});
+        return n;
+    }
+
+    pub fn contains(self: *const Gensyms, n: []const u8) bool {
+        return self.names.contains(n);
+    }
+};
+
+/// Analyzes a whole program. On an error, fills diag if given, otherwise
+/// prints it. All memory comes from alloc (meant to be an arena).
+pub fn analyze(src: []const u8, program: Value, alloc: Allocator, diag: ?*Diagnostic, options: Options) Error!ast.Program {
+    var a: Analyzer = .{ .src = src, .alloc = alloc, .diag = diag, .options = options };
     return a.analyze_program(program);
 }
 
-/// Analyzes a single top-level form (used by the REPL, which reads one form at a time)
-pub fn analyze_form(src: []const u8, form: Value, alloc: Allocator, diag: ?*Diagnostic) Error!ast.TopLevel {
-    var a: Analyzer = .{ .src = src, .alloc = alloc, .diag = diag };
+/// Analyzes a single top-level form (used by the REPL, which reads one form at a time).
+pub fn analyze_form(src: []const u8, form: Value, alloc: Allocator, diag: ?*Diagnostic, options: Options) Error!ast.TopLevel {
+    var a: Analyzer = .{ .src = src, .alloc = alloc, .diag = diag, .options = options };
     return a.top_level(form);
 }
 
@@ -28,10 +82,14 @@ const Analyzer = struct {
     src: []const u8,
     alloc: Allocator,
     diag: ?*Diagnostic,
+    options: Options,
+    expansion_depth: u32 = 0,
+    expanding: ?[]const u8 = null,
 
     // errors
     fn fail(self: *Analyzer, pos: u32, comptime fmt: []const u8, args: anytype) Error {
-        const message = try std.fmt.allocPrint(self.alloc, fmt, args);
+        var message = try std.fmt.allocPrint(self.alloc, fmt, args);
+        if (self.expanding) |m| message = try std.fmt.allocPrint(self.alloc, "{s} (in the expansion of \"{s}\")", .{ message, m });
         const d = diagnostic_at(self.src, pos, message);
         if (self.diag) |out| {
             out.* = d;
@@ -39,6 +97,70 @@ const Analyzer = struct {
             std.debug.print("error at {d}:{d}: {s}\n", .{ d.line, d.column, d.message });
         }
         return error.AnalysisFailed;
+    }
+
+    /// Reports a diagnostic someone else produced (a macro host).
+    fn report(self: *Analyzer, d: Diagnostic) Error {
+        if (self.diag) |out| {
+            out.* = d;
+        } else {
+            std.debug.print("error at {d}:{d}: {s}\n", .{ d.line, d.column, d.message });
+        }
+        return error.AnalysisFailed;
+    }
+
+    // macros
+    /// If v is a call to a macro, returns the code it expands to.
+    fn expand(self: *Analyzer, v: Value) Error!?Value {
+        const host = self.options.macros orelse return null;
+        const head = form_head(v) orelse return null;
+        if (!host.vtable.is_macro(host.ctx, head)) return null;
+        if (self.expansion_depth >= max_expansion_depth)
+            return self.fail(v.pos, "macro expansion is nested more than {d} levels deep; does \"{s}\" expand to itself forever?", .{ max_expansion_depth, head });
+
+        var d: Diagnostic = undefined;
+        return host.vtable.expand(host.ctx, self.src, head, v.pos, v.data.array[1..], &d) catch |err| switch (err) {
+            error.MacroFailed => return self.report(d),
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+    }
+
+    /// ["macro", {"name": ..., "params": [...], "rest": ..., "doc": ...}, body...]
+    fn macro(self: *Analyzer, v: Value) Error!ast.Macro {
+        const host = self.options.macros orelse
+            return self.fail(v.pos, "macros can't be defined here", .{});
+        const items = v.data.array;
+        if (items.len < 3) return self.fail(v.pos, "macro takes a definition object and a body", .{});
+        const obj = try self.definition_object(items[1], "macro", &.{ "name", "params", "rest", "doc" }, &.{ "name", "params" });
+
+        const params_value = obj.get("params").?;
+        const list = switch (params_value.data) {
+            .array => |l| l,
+            else => return self.fail(params_value.pos, "macro params must be an array of names", .{}),
+        };
+        const rest = obj.get("rest");
+        const params = try self.alloc.alloc(ast.Param, list.len + @intFromBool(rest != null));
+        for (list, 0..) |p, i| params[i] = .{ .name = try self.name(p), .pos = p.pos, .type = .data };
+        if (rest) |r| params[list.len] = .{ .name = try self.name(r), .pos = r.pos, .type = .data };
+        for (params, 0..) |p, i| {
+            for (params[0..i]) |earlier| {
+                if (eql(earlier.name, p.name)) return self.fail(p.pos, "duplicate parameter \"{s}\"", .{p.name});
+            }
+        }
+
+        const m: ast.Macro = .{
+            .pos = v.pos,
+            .name = try self.name(obj.get("name").?),
+            .doc = if (obj.get("doc")) |d| try self.string_literal(d) else null,
+            .lambda = .{ .params = params, .returns = .data, .body = try self.exprs(items[2..]) },
+            .has_rest = rest != null,
+        };
+        var d: Diagnostic = undefined;
+        host.vtable.define(host.ctx, self.src, &m, &d) catch |err| switch (err) {
+            error.MacroFailed => return self.report(d),
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        return m;
     }
 
     // program and top level
@@ -53,9 +175,19 @@ const Analyzer = struct {
     }
 
     fn top_level(self: *Analyzer, v: Value) Error!ast.TopLevel {
+        // A macro can expand to a definition, so expand before anything else.
+        if (try self.expand(v)) |expansion| {
+            const saved = self.expanding;
+            defer self.expanding = saved;
+            self.expanding = form_head(v);
+            self.expansion_depth += 1;
+            defer self.expansion_depth -= 1;
+            return self.top_level(expansion);
+        }
         if (form_head(v)) |head| {
             if (eql(head, "def")) return .{ .def = try self.def(v) };
             if (eql(head, "fn")) return .{ .@"fn" = try self.named_fn(v) };
+            if (eql(head, "macro")) return .{ .macro = try self.macro(v) };
         }
         return .{ .expr = try self.expr(v) };
     }
@@ -77,18 +209,51 @@ const Analyzer = struct {
     fn named_fn(self: *Analyzer, v: Value) Error!ast.Fn {
         const items = v.data.array;
         if (items.len < 3) return self.fail(v.pos, "fn takes a definition object and a body", .{});
-        const obj = try self.definition_object(items[1], "fn", &.{ "name", "params", "returns", "doc" }, &.{ "name", "params", "returns" });
+        const obj = try self.definition_object(items[1], "fn", &.{
+            "name",
+            "params",
+            "returns",
+            "doc",
+            "comptime",
+        }, &.{
+            "name",
+            "params",
+            "returns",
+        });
         const doc: ?[]const u8 = if (obj.get("doc")) |d| try self.string_literal(d) else null;
-        return .{
+        const is_comptime = if (obj.get("comptime")) |c| switch (c.data) {
+            .bool => |b| b,
+            else => return self.fail(c.pos, "\"comptime\" must be true or false", .{}),
+        } else false;
+        const f: ast.Fn = .{
             .pos = v.pos,
             .name = try self.name(obj.get("name").?),
             .doc = doc,
             .lambda = try self.lambda_parts(obj, items[2..]),
+            .is_comptime = is_comptime,
         };
+        if (is_comptime) {
+            const host = self.options.macros orelse
+                return self.fail(v.pos, "comptime functions can't be defined here", .{});
+            var d: Diagnostic = undefined;
+            host.vtable.define_comptime(host.ctx, self.src, &f, &d) catch |err| switch (err) {
+                error.MacroFailed => return self.report(d),
+                error.OutOfMemory => return error.OutOfMemory,
+            };
+        }
+        return f;
     }
 
     // expressions
     fn expr(self: *Analyzer, v: Value) Error!ast.Expr {
+        if (try self.expand(v)) |expansion| {
+            const saved = self.expanding;
+            defer self.expanding = saved;
+            self.expanding = form_head(v);
+            self.expansion_depth += 1;
+            defer self.expansion_depth -= 1;
+            return self.expr(expansion);
+        }
         const kind: ast.Expr.Kind = switch (v.data) {
             .null => .null,
             .bool => |b| .{ .bool = b },
@@ -134,7 +299,7 @@ const Analyzer = struct {
             }
             if (eql(head, "insert") or eql(head, "splice"))
                 return self.fail(v.pos, "{s} can only be used inside a template", .{head});
-            if (eql(head, "def") or eql(head, "fn"))
+            if (eql(head, "def") or eql(head, "fn") or eql(head, "macro"))
                 return self.fail(v.pos, "{s} is only allowed at the top level", .{head});
             if (eql(head, "type"))
                 return self.fail(v.pos, "type is not supported yet", .{});
@@ -255,6 +420,12 @@ const Analyzer = struct {
                 if (!has_holes) return .{ .literal = v };
                 return .{ .object = .{ .pos = v.pos, .pairs = out } };
             },
+            .string => |sym| {
+                // tmp#: a fresh name per evaluation of the template.
+                if (sym.len > 1 and sym[sym.len - 1] == '#' and std.mem.indexOfScalar(u8, sym[0 .. sym.len - 1], '#') == null)
+                    return .{ .auto = .{ .pos = v.pos, .base = sym[0 .. sym.len - 1] } };
+                return .{ .literal = v };
+            },
             else => return .{ .literal = v },
         }
     }
@@ -350,6 +521,10 @@ const Analyzer = struct {
         if (std.mem.indexOfScalar(u8, s, '.') != null)
             return self.fail(v.pos, "field access (\"{s}\") is not supported yet", .{s});
         if (s[0] == '@') return self.fail(v.pos, "intrinsics (\"{s}\") are not supported yet", .{s});
+        if (std.mem.indexOfScalar(u8, s, '#') != null) {
+            const generated = if (self.options.gensyms) |g| g.contains(s) else false;
+            if (!generated) return self.fail(v.pos, "\"{s}\": names can't contain '#'; it's reserved for generated names", .{s});
+        }
         for (special_forms) |sf| {
             if (eql(s, sf)) return self.fail(v.pos, "\"{s}\" is a special form and can't be used as a name or value", .{s});
         }

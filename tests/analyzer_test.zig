@@ -3,6 +3,7 @@ const reader = @import("reader");
 const analyzer = @import("analyzer");
 const harness = @import("harness");
 const checker = @import("checker");
+const macros = @import("macros");
 
 test "programs analyze" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -10,6 +11,7 @@ test "programs analyze" {
     const alloc = arena.allocator();
 
     var failures: usize = 0;
+    var discard: std.Io.Writer.Allocating = .init(alloc);
     for (try harness.juck_files(alloc, "tests/programs")) |file| {
         var diag: reader.Diagnostic = undefined;
         const value = reader.read(file.src, alloc, &diag) catch {
@@ -17,7 +19,8 @@ test "programs analyze" {
             failures += 1;
             continue;
         };
-        const analyzed = analyzer.analyze(file.src, value, alloc, &diag) catch {
+        var expander = macros.Expander.init(alloc, &discard.writer);
+        const analyzed = analyzer.analyze(file.src, value, alloc, &diag, expander.options()) catch {
             std.debug.print("FAIL programs/{s}: {d}:{d}: {s}\n", .{ file.name, diag.line, diag.column, diag.message });
             failures += 1;
             continue;
@@ -36,6 +39,7 @@ test "analysis errors are reported" {
     const alloc = arena.allocator();
 
     var failures: usize = 0;
+    var discard: std.Io.Writer.Allocating = .init(alloc);
     for (try harness.juck_files(alloc, "tests/analysis_errors")) |file| {
         var diag: reader.Diagnostic = undefined;
         const value = reader.read(file.src, alloc, &diag) catch {
@@ -43,7 +47,8 @@ test "analysis errors are reported" {
             failures += 1;
             continue;
         };
-        if (analyzer.analyze(file.src, value, alloc, &diag)) |_| {
+        var expander = macros.Expander.init(alloc, &discard.writer);
+        if (analyzer.analyze(file.src, value, alloc, &diag, expander.options())) |_| {
             std.debug.print("FAIL analysis_errors/{s}: analyzed without errors\n", .{file.name});
             failures += 1;
             continue;
@@ -67,6 +72,7 @@ test "type errors are reported" {
     const alloc = arena.allocator();
 
     var failures: usize = 0;
+    var discard: std.Io.Writer.Allocating = .init(alloc);
     for (try harness.juck_files(alloc, "tests/type_errors")) |file| {
         var diag: reader.Diagnostic = undefined;
         const value = reader.read(file.src, alloc, &diag) catch {
@@ -74,7 +80,8 @@ test "type errors are reported" {
             failures += 1;
             continue;
         };
-        const analyzed = analyzer.analyze(file.src, value, alloc, &diag) catch {
+        var expander = macros.Expander.init(alloc, &discard.writer);
+        const analyzed = analyzer.analyze(file.src, value, alloc, &diag, expander.options()) catch {
             std.debug.print("FAIL type_errors/{s}: fails pass 1 ({d}:{d}: {s}), not type checking\n", .{ file.name, diag.line, diag.column, diag.message });
             failures += 1;
             continue;

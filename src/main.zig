@@ -7,6 +7,8 @@ const analyzer = @import("analyzer");
 const checker = @import("checker");
 const interpreter = @import("interpreter");
 const repl = @import("repl");
+const macros = @import("macros");
+const unparse = @import("unparse");
 
 const usage =
     \\usage: juck [<file>] [--repl | --check | --tokens | --ast | --json]
@@ -21,7 +23,7 @@ const usage =
     \\
 ;
 
-const Mode = enum { run, repl, check, tokens, ast, json };
+const Mode = enum { run, repl, check, tokens, ast, json, expand };
 
 fn main_impl(init: std.process.Init) !void {
     var da = std.heap.DebugAllocator(.{}){};
@@ -73,16 +75,27 @@ fn main_impl(init: std.process.Init) !void {
     }
 
     const program = try reader.read(src, alloc, null);
+    var expander = macros.Expander.init(alloc, out);
     switch (mode) {
-        .repl => {
-            const analyzed = try analyzer.analyze(src, program, alloc, null);
-            try repl.run(init.io, alloc, out, .{ .src = src, .program = analyzed });
-        },
         .run, .check => {
-            const analyzed = try analyzer.analyze(src, program, alloc, null);
+            const analyzed = try analyzer.analyze(src, program, alloc, null, expander.options());
             try checker.check(src, analyzed, alloc, null);
-            if (mode == .run) try interpreter.run(src, analyzed, alloc, out, null, .{});
+            if (mode == .run) try interpreter.run(src, analyzed, alloc, out, null, .{
+                .gensyms = &expander.gensyms,
+                .macros = expander.host(),
+            });
         },
+        .expand => {
+            // Output from `print` in macro bodies goes to stderr, so stdout
+            // is only the expanded program.
+            var stderr_buf: [4096]u8 = undefined;
+            var stderr_writer = Io.File.stderr().writer(init.io, &stderr_buf);
+            defer stderr_writer.interface.flush() catch {};
+            expander = macros.Expander.init(alloc, &stderr_writer.interface);
+            const analyzed = try analyzer.analyze(src, program, alloc, null, expander.options());
+            try printer.write_json(out, try unparse.program(alloc, analyzed));
+        },
+        .repl => try repl.run(init.io, alloc, out, .{ .src = src, .program = program }),
         .tokens => {},
         .ast => try printer.write_tree(out, program, 0),
         .json => try printer.write_json(out, program),

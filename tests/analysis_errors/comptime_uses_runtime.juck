@@ -1,0 +1,2 @@
+// error: 2:145
+[["fn", {"name": "g", "params": [], "returns": "data"}, ["data", 1]], ["fn", {"name": "f", "params": [], "returns": "data", "comptime": true}, ["g"]]]

@@ -197,6 +197,28 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    const macros_mod = b.createModule(.{
+        .root_source_file = b.path("src/macros.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "reader", .module = reader_mod },
+            .{ .name = "ast", .module = ast_mod },
+            .{ .name = "analyzer", .module = analyzer_mod },
+            .{ .name = "checker", .module = checker_mod },
+            .{ .name = "interpreter", .module = interpreter_mod },
+        },
+    });
+
+    const unparse_mod = b.createModule(.{
+        .root_source_file = b.path("src/unparse.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "reader", .module = reader_mod },
+            .{ .name = "ast", .module = ast_mod },
+            .{ .name = "printer", .module = printer_mod },
+        },
+    });
+
     const repl_mod = b.createModule(.{
         .root_source_file = b.path("src/repl.zig"),
         .target = target,
@@ -206,6 +228,9 @@ pub fn build(b: *std.Build) void {
             .{ .name = "analyzer", .module = analyzer_mod },
             .{ .name = "checker", .module = checker_mod },
             .{ .name = "interpreter", .module = interpreter_mod },
+            .{ .name = "macros", .module = macros_mod },
+            .{ .name = "unparse", .module = unparse_mod },
+            .{ .name = "printer", .module = printer_mod },
         },
     });
 
@@ -258,6 +283,8 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addImport("checker", checker_mod);
     exe.root_module.addImport("interpreter", interpreter_mod);
     exe.root_module.addImport("repl", repl_mod);
+    exe.root_module.addImport("macros", macros_mod);
+    exe.root_module.addImport("unparse", unparse_mod);
 
     // This declares intent for the executable to be installed into the
     // install prefix when running `zig build` (i.e. when executing the default
@@ -338,6 +365,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "analyzer", .module = analyzer_mod },
                 .{ .name = "harness", .module = harness_mod },
                 .{ .name = "checker", .module = checker_mod },
+                .{ .name = "macros", .module = macros_mod },
             },
         }),
     });

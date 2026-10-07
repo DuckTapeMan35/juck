@@ -47,6 +47,11 @@ pub const Options = struct {
     /// max_call_depth nested calls fit even in Debug builds, where each
     /// call uses a lot of stack. Only the part actually used is touched
     stack_size: usize = 1024 * 1024 * 1024,
+    /// Where generated names (gensym, tmp# in templates) are recorded,
+    /// so the analyzer accepts them. Without it, generating names is an error.
+    gensyms: ?*analyzer.Gensyms = null,
+    /// Macros available to code run by eval.
+    macros: ?analyzer.MacroHost = null,
 };
 
 /// Runs `program`, writing `print` output to `out`. On a runtime error,
@@ -80,6 +85,12 @@ pub const Session = struct {
         _ = try self.on_big_stack(src, diag, .{ .program = program });
     }
 
+    /// Calls a function value with already-evaluated arguments (used to run
+    /// macros). pos is where errors in the call itself are reported.
+    pub fn apply(self: *Session, src: []const u8, f: *const Closure, args: []const Value, pos: u32, diag: ?*Diagnostic) Error!Value {
+        return (try self.on_big_stack(src, diag, .{ .apply = .{ .f = f, .args = args, .pos = pos } })).?;
+    }
+
     /// Runs one more top-level form (used by the REPL). A definition
     /// replaces any earlier one with the same name; functions look up
     /// globals when they are called, so they see the new definition.
@@ -92,10 +103,13 @@ pub const Session = struct {
     const Job = union(enum) {
         program: ast.Program,
         form: *const ast.TopLevel,
+        apply: struct { f: *const Closure, args: []const Value, pos: u32 },
     };
 
     /// Runs job on a thread with a stack of options.stack_size.
     fn on_big_stack(self: *Session, src: []const u8, diag: ?*Diagnostic, job: Job) Error!?Value {
+        const saved = .{ self.src, self.diag, self.depth };
+        defer self.src, self.diag, self.depth = saved;
         self.src = src;
         self.diag = diag;
         self.depth = 0;
@@ -125,8 +139,10 @@ pub const Session = struct {
                     try self.globals.put(self.alloc, f.name, try self.closure(&f.lambda, null));
                     return null;
                 },
+                .macro => return null,
                 .expr => |e| return try self.eval(e, null),
             },
+            .apply => |a| return try self.apply_closure(a.pos, a.f, a.args),
         }
     }
 
@@ -156,7 +172,7 @@ pub const Session = struct {
         for (program.items) |item| {
             switch (item) {
                 .def => |d| try self.globals.put(self.alloc, d.name, try self.eval(d.value, null)),
-                .@"fn" => {},
+                .@"fn", .macro => {},
                 .expr => |e| _ = try self.eval(e, null),
             }
         }
@@ -196,19 +212,27 @@ pub const Session = struct {
             },
             .do => |body| self.eval_body(body, env),
             .lambda => |lambda| self.closure(lambda, env),
-            .template => |t| .{ .data = try self.fill_template(t.*, env) },
+            .template => |t| blk: {
+                var names: std.StringHashMapUnmanaged([]const u8) = .empty;
+                break :blk .{ .data = try self.fill_template(t.*, env, &names) };
+            },
         };
     }
 
     /// Builds the data a template describes, evaluating its holes.
-    fn fill_template(self: *Session, t: ast.Template, env: ?*const Env) Error!reader.Value {
+    fn fill_template(self: *Session, t: ast.Template, env: ?*const Env, names: *std.StringHashMapUnmanaged([]const u8)) Error!reader.Value {
         switch (t) {
             .literal => |v| return v,
+            .auto => |a| {
+                const entry = try names.getOrPut(self.alloc, a.base);
+                if (!entry.found_existing) entry.value_ptr.* = try self.generate(a.pos, a.base);
+                return .{ .pos = a.pos, .data = .{ .string = entry.value_ptr.* } };
+            },
             .insert => |e| return (try self.eval(e, env)).data,
             .array => |a| {
                 var items: std.ArrayList(reader.Value) = .empty;
                 for (a.parts) |part| switch (part) {
-                    .one => |inner| try items.append(self.alloc, try self.fill_template(inner, env)),
+                    .one => |inner| try items.append(self.alloc, try self.fill_template(inner, env, names)),
                     .splice => |e| {
                         const d = (try self.eval(e, env)).data;
                         const spliced = switch (d.data) {
@@ -222,7 +246,7 @@ pub const Session = struct {
             },
             .object => |o| {
                 const pairs = try self.alloc.alloc(reader.Pair, o.pairs.len);
-                for (o.pairs, pairs) |p, *out| out.* = .{ .key = p.key, .value = try self.fill_template(p.value, env) };
+                for (o.pairs, pairs) |p, *out| out.* = .{ .key = p.key, .value = try self.fill_template(p.value, env, names) };
                 return .{ .pos = o.pos, .data = .{ .object = pairs } };
             },
         }
@@ -252,13 +276,16 @@ pub const Session = struct {
         }
 
         const f = (try self.eval(c.callee.*, env)).func;
+        const args = try self.alloc.alloc(Value, c.args.len);
+        for (c.args, args) |arg, *v| v.* = try self.eval(arg, env); // left to right
+        return self.apply_closure(pos, f, args);
+    }
 
-        // Arguments are evaluated left to right, then bound in the
-        // closure's environment (not the caller's).
+    /// Runs a function's body with its parameters bound to args, in the
+    /// environment the function captured (not the caller's).
+    fn apply_closure(self: *Session, pos: u32, f: *const Closure, args: []const Value) Error!Value {
         var inner = f.env;
-        for (c.args, f.lambda.params) |arg, param| {
-            inner = try self.bind(inner, param.name, try self.eval(arg, env));
-        }
+        for (f.lambda.params, args) |param, arg| inner = try self.bind(inner, param.name, arg);
 
         if (self.depth >= self.options.max_call_depth)
             return self.fail(pos, "too many nested calls (more than {d}); is the recursion infinite?", .{self.options.max_call_depth});
@@ -346,9 +373,19 @@ pub const Session = struct {
             },
             .@"to-data" => .{ .data = try self.to_data(pos, vals[0]) },
             .symbol => .{ .data = .{ .pos = pos, .data = .{ .string = try self.encode(vals[0].str) } } },
+            .gensym => .{ .data = .{ .pos = pos, .data = .{ .string = try self.generate(pos, vals[0].str) } } },
             .@"data-array" => unreachable, // handled above
             .eval => try self.eval_data(pos, vals[0].data),
         };
+    }
+
+    /// A fresh generated name, base#N
+    fn generate(self: *Session, pos: u32, base: []const u8) Error![]const u8 {
+        const gensyms = self.options.gensyms orelse
+            return self.fail(pos, "generated names aren't available here", .{});
+        if (base.len == 0 or base[0] == '@' or std.mem.indexOfAny(u8, base, "#.\\\"") != null)
+            return self.fail(pos, "\"{s}\" can't be the base of a generated name", .{base});
+        return gensyms.fresh(self.alloc, base);
     }
 
     fn expect_array(self: *Session, pos: u32, d: reader.Value) Error![]const reader.Value {
@@ -429,11 +466,14 @@ pub const Session = struct {
     /// to-data. Errors in the evaluated code are runtime errors here.
     fn eval_data(self: *Session, pos: u32, d: reader.Value) Error!Value {
         var diag: Diagnostic = undefined;
-        const item = analyzer.analyze_form(self.src, d, self.alloc, &diag) catch |err| switch (err) {
+        const item = analyzer.analyze_form(self.src, d, self.alloc, &diag, .{
+            .macros = self.options.macros,
+            .gensyms = self.options.gensyms,
+        }) catch |err| switch (err) {
             error.AnalysisFailed => return self.fail(pos, "eval: {s}", .{diag.message}),
             else => |e| return e,
         };
-        if (item != .expr) return self.fail(pos, "eval can only evaluate expressions, not def or fn", .{});
+        if (item != .expr) return self.fail(pos, "eval can only evaluate expressions, not def, fn or macro", .{});
 
         // The checker only needs the globals' types, and every runtime
         // value's type can be read off the value itself.

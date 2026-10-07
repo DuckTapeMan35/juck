@@ -59,6 +59,10 @@ version: 0.1
   `"juck"` is the format version; it changes when the shape of code
   changes. Compiled programs embed the same JSON.
 
+  `juck <file> --expand` emits the program in the same format after
+  macro expansion: a standalone program without macros, which runs the
+  same way as the original. See {*** macro}.
+
   Anything whose order matters is written as an array, never as object
   keys: JSON does not guarantee key order, and some languages' parsers
   do not preserve it.
@@ -94,7 +98,8 @@ version: 0.1
 ** Names
    A symbol may not contain `.` (see {* Constructing and accessing values})
    or start with `@` (see {** Intrinsics}), and can't be the name of a
-   special form.
+   special form. `#` is reserved for generated names (see {*** macro}):
+   names written by hand can't contain it.
 
    Names can't shadow: a local name (a `let` binding or a parameter) can't
    reuse the name of a built-in, a global defined anywhere in the program,
@@ -130,11 +135,14 @@ version: 0.1
   direction: right
   head: "form head"
   head -> "special form: own rules"
+  head -> "macro: expanded first"
   head -> "intrinsic: compile time"
   head -> "function: runtime call"
   @end
 
   - A /special form/ has its own evaluation rules; see {** Special forms}.
+  - A /macro/ call is replaced by the code the macro returns, before
+    anything else happens to it; see {*** macro}.
   - An /intrinsic/ is called like a function, but the compiler handles
     it; see {** Intrinsics}.
   - Anything else is a /function call/: the head and the arguments are
@@ -149,8 +157,8 @@ version: 0.1
    Special forms are the forms that can't be functions: they bind names,
    define types, or control whether and when their arguments are
    evaluated. Their names are reserved and cannot be redefined:
-   `def`, `fn`, `lambda`, `type`, `if`, `let`, `do`, `data`, `template`,
-   `insert`, `splice`.
+   `def`, `fn`, `lambda`, `macro`, `type`, `if`, `let`, `do`, `data`,
+   `template`, `insert`, `splice`.
 
 *** def
     Defines a global name. Only allowed at the top level.
@@ -181,6 +189,7 @@ version: 0.1
     "definition object" -> params
     "definition object" -> returns
     "definition object" -> "doc (optional)"
+    "definition object" -> "comptime (optional)"
     @end
 
     Definition object keys:
@@ -188,13 +197,15 @@ version: 0.1
     - `"params"` (required): an array of `[name, type]` pairs, in order.
     - `"returns"` (required): the return type.
     - `"doc"` (optional): a documentation string.
+    - `"comptime"` (optional): `true` to also make the function available
+      at compile time, to macros; see {*** macro}.
 
     The body is one or more expressions; the value of the last one is
     the function's result.
 
 *** lambda
     An anonymous function. Same definition object as `fn`, without
-    `"name"`.
+    `"name"` and `"comptime"`.
 
     @code json
     ["lambda", {"params": [["x", "i64"]], "returns": "i64"}, ["*", "x", "x"]]
@@ -202,6 +213,76 @@ version: 0.1
 
     A lambda can use names from the scope it is defined in; it keeps
     them for as long as it exists (it is a closure).
+
+*** macro
+    Defines a macro: a function from code to code that runs while the
+    program is analyzed, before it runs. Only allowed at the top level.
+
+    @code json
+    ["macro", {"name": "when", "params": ["cond"], "rest": "body"},
+      ["template", ["if", ["insert", "cond"], ["do", ["splice", "body"]], null]]]
+    @end
+
+    Definition object keys:
+    - `"name"` (required): the macro's name.
+    - `"params"` (required): an array of parameter names.
+    - `"rest"` (optional): a name for the remaining arguments, as a data
+      array.
+    - `"doc"` (optional): a documentation string.
+
+    A call to a macro is replaced by the code the macro returns, which is
+    then analyzed in its place. Arguments are passed unevaluated, as
+    `data`, and the result must be `data`. The result may contain more
+    macro calls, including to the same macro, so macros can be recursive.
+    A macro can expand to a definition, like a `def` or `fn`.
+
+    @code d2
+    #color macro yellow
+    direction: right
+    call: "macro call"
+    expansion: "returned code"
+    call -> macro
+    macro -> expansion
+    expansion -> analyzer
+    @end
+
+    A macro must be defined before it is used, and its name can't be used
+    as a value. Macros share the global namespace with `def` and `fn`.
+
+**** Compile time
+     A macro runs before the program does, so its body can only use what
+     exists at compile time: built-ins, special forms, local functions,
+     other macros, and functions marked `"comptime": true`. The program's
+     other `def`s and `fn`s only exist when the program runs.
+
+     A comptime function is an ordinary function that also exists at
+     compile time. It follows the same rule, and must be defined before
+     the macro use that needs it.
+
+     @code json
+     [
+       ["fn", {"name": "twice-code", "params": [["e", "data"]], "returns": "data", "comptime": true},
+         ["template", ["+", ["insert", "e"], ["insert", "e"]]]],
+       ["macro", {"name": "double", "params": ["e"]}, ["twice-code", "e"]],
+     ]
+     @end
+
+**** Hygiene
+     In a template, a symbol ending in `#` (like `tmp#`) becomes a fresh
+     generated name, the same everywhere in one evaluation of the
+     template. Generated names contain `#`, which names written by hand
+     can't, so a macro's local names never collide with the names around
+     its call.
+
+     @code json
+     ["macro", {"name": "print-twice", "params": ["e"]},
+       ["template", ["let", [["v#", "i64", ["insert", "e"]]],
+         ["print", "v#"], ["print", "v#"]]]]
+     @end
+
+     Generated names are only valid in the program or REPL session that
+     generated them. `--expand` renames them to ordinary names that appear
+     nowhere else in the program.
 
 *** type
     Names a type.
@@ -262,6 +343,7 @@ version: 0.1
       be `data`.
     - `["splice", expr]`, as an element of an array, is replaced by the
       elements of `expr`, which must be a `data` array.
+    - A symbol ending in `#` becomes a generated name; see {**** Hygiene}.
 
     If `x` holds `["*", 2, 3]`, the template above produces
     `["+", ["*", 2, 3], 1]`. Everything else in the template is data, as
@@ -310,7 +392,8 @@ version: 0.1
 
    Values are written as JSON: strings in quotes with escapes, data as
    the JSON it is, and floats always with a `.` or an exponent, so they
-   read back as `f64`. Floating point division by `0` writes back `null`
+   read back as `f64`. The exceptions are the non-finite floats, which
+   JSON can't express: they are written `inf`, `-inf` and `nan`.
 
 ** Code as data
    The built-ins for working with `data` are described in
@@ -357,6 +440,8 @@ version: 0.1
 
 ** Building
    - `["data-array", d, ...]`: an array of any number of `data` values.
+   - `["gensym", s]`: a fresh generated symbol, named after the `str`
+     `s`; see {**** Hygiene}.
    - {*** template}: code with holes.
 
 ** eval
@@ -364,16 +449,19 @@ version: 0.1
    returns its value as `data`: a `data` result as it is, any other
    result converted with `to-data`.
 
-   - The evaluated code can use globals, but not the local names around
-     the `eval`.
-   - Only expressions can be evaluated, not `def` or `fn`.
+   - The evaluated code can use globals and macros, but not the local
+     names around the `eval`.
+   - Only expressions can be evaluated, not `def`, `fn` or `macro`.
    - Errors in the evaluated code, including type errors, are runtime
      errors of the `eval`.
    - A function result is an error, since it has no `data` form.
 
 * Execution
-  A program is evaluated like a Lisp: the top-level forms are evaluated
-  in order, from first to last.
+  A program is first analyzed as a whole, top-level form by top-level
+  form. Macros are defined and expanded during analysis, so they run
+  before the program does, and everything they print appears first.
+  Then the program is checked, and evaluated like a Lisp: the top-level
+  forms are evaluated in order, from first to last.
 
   A name defined with `def` or `type` is available to every form after
   it. Functions defined with `fn` at the top level are known to the
@@ -386,7 +474,8 @@ version: 0.1
   everything entered before. A name can be defined again, but only with
   the same type; functions that use it see the new definition on their
   next call. If a definition's value fails to evaluate, the name keeps
-  its previous meaning.
+  its previous meaning. A macro or comptime function can be redefined
+  too; code that was already expanded keeps its expansion.
 
 * Constructing and accessing values
   A named type is called like a function to construct a value:
@@ -481,10 +570,11 @@ version: 0.1
         maps. (`data` covers code as values; these are for ordinary
         typed collections.)
   - ( ) Type inference, starting with `let` bindings.
-  - ( ) Macros: how they're defined, when they're expanded (at analysis
-        time), which functions they can call at compile time, and
-        generated names (`gensym`) to avoid collisions under the
-        no-shadowing rule.
+  - ( ) Reflection for macros: built-ins like `type-of` and
+        `definition-of`, so macros can generate code based on the
+        program's definitions and types.
+  - ( ) Comptime functions that call each other in either order: right
+        now each one can only use comptime functions defined before it.
   - ( ) Modules: what `@import` returns, and how a module exposes
         names (probably as an object).
   - ( ) Methods: does `["point.scale", 2.0]` look up a field, or call
@@ -496,3 +586,5 @@ version: 0.1
         native code.
   - ( ) Defining globals with `eval`, and how that relates to REPL
         redefinition.
+  - ( ) Mutability and memory: `const`/mutable bindings, pointers, and
+        manual memory management like Zig's.

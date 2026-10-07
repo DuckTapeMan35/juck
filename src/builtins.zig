@@ -40,6 +40,7 @@ pub const Builtin = enum {
 
     // code as data: building and running
     @"data-array",
+    gensym,
     eval,
 
     pub fn lookup(text: []const u8) ?Builtin {
@@ -58,7 +59,7 @@ pub const Builtin = enum {
             .@"data-null?", .@"data-bool?", .@"data-int?", .@"data-float?" => 1,
             .@"data-symbol?", .@"data-array?", .@"data-object?", .@"data-len" => 1,
             .@"data-to-i64", .@"data-to-f64", .@"data-to-bool", .@"data-to-str" => 1,
-            .@"to-data", .symbol, .eval => 1,
+            .@"to-data", .symbol, .gensym, .eval => 1,
             .@"data-slice" => 3,
             else => 2,
         };

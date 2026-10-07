@@ -16,11 +16,19 @@ pub fn check(src: []const u8, program: ast.Program, alloc: Allocator, diag: ?*Di
     try s.check_program(src, program, diag);
 }
 
+fn kind_name(kind: @FieldType(Global, "kind")) []const u8 {
+    return switch (kind) {
+        .def => "value",
+        .@"fn" => "function",
+        .macro => "macro",
+    };
+}
+
 pub const Global = struct {
     type: Type,
     /// Index of the top-level form that defines it
     index: usize,
-    kind: enum { def, @"fn" },
+    kind: enum { def, @"fn", macro },
 };
 
 const Local = struct { name: []const u8, type: Type };
@@ -67,6 +75,8 @@ pub const Session = struct {
                     .index = i,
                     .kind = .@"fn",
                 }),
+                // Macros are expanded away, but their names are taken.
+                .macro => |m| try self.declare(m.pos, m.name, .{ .type = .null, .index = i, .kind = .macro }),
                 .expr => {},
             }
         }
@@ -83,6 +93,7 @@ pub const Session = struct {
                     defer self.in_fn_body = false;
                     try self.check_lambda(f.lambda);
                 },
+                .macro => {}, // checked when it was defined, by the macro host
                 .expr => |e| _ = try self.type_of(e),
             }
         }
@@ -122,6 +133,10 @@ pub const Session = struct {
                 };
                 return null;
             },
+            .macro => |m| {
+                try self.redeclare(m.pos, m.name, .{ .type = .null, .index = self.current, .kind = .macro });
+                return null;
+            },
             .expr => |e| return try self.type_of(e),
         }
     }
@@ -138,6 +153,8 @@ pub const Session = struct {
 
     fn redeclare(self: *Session, pos: u32, name: []const u8, global: Global) Error!void {
         if (self.globals.get(name)) |old| {
+            if ((old.kind == .macro) != (global.kind == .macro))
+                return self.fail(pos, "\"{s}\" is already defined as a {s}; it can't be redefined as a {s}", .{ name, kind_name(old.kind), kind_name(global.kind) });
             if (!old.type.eql(global.type))
                 return self.fail(pos, "\"{s}\" is already defined as {f}; it can only be redefined with the same type", .{ name, old.type });
             self.globals.putAssumeCapacity(name, global);
@@ -205,7 +222,7 @@ pub const Session = struct {
     /// Every hole in a template must be filled with data
     fn check_template(self: *Session, t: ast.Template) Error!void {
         switch (t) {
-            .literal => {},
+            .literal, .auto => {},
             .insert => |e| try self.expect(e, .data, "the inserted value", .{}),
             .array => |a| for (a.parts) |part| switch (part) {
                 .one => |inner| try self.check_template(inner),
@@ -260,6 +277,10 @@ pub const Session = struct {
             const visible = switch (g.kind) {
                 .def => g.index < self.current,
                 .@"fn" => self.in_fn_body or g.index < self.current,
+                .macro => if (g.index > self.current)
+                    return self.fail(pos, "\"{s}\" is a macro, which must be defined before it is used", .{name})
+                else
+                    return self.fail(pos, "\"{s}\" is a macro; it can only be called, not used as a value", .{name}),
             };
             if (!visible) return self.fail(pos, "\"{s}\" is used before it is defined", .{name});
             return g.type;
@@ -379,7 +400,7 @@ pub const Session = struct {
                 if (t == .@"fn") return self.fail(args[0].pos, "a function has no data form", .{});
                 return .data;
             },
-            .symbol => {
+            .symbol, .gensym => {
                 try self.expect_args(b, args, &.{.str});
                 return .data;
             },

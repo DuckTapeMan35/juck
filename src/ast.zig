@@ -106,6 +106,9 @@ pub const Binding = struct {
 /// Subtrees without holes are kept as plain literal values
 pub const Template = union(enum) {
     literal: reader.Value,
+    /// A symbol ending in #, like tmp#: replaced by a fresh generated
+    /// name, the same one everywhere in one evaluation of the template.
+    auto: struct { pos: u32, base: []const u8 },
     /// ["insert", expr]: the value of expr (which is data) goes here.
     insert: Expr,
     array: struct { pos: u32, parts: []const TemplatePart },
@@ -152,6 +155,7 @@ pub const Program = struct {
 pub const TopLevel = union(enum) {
     def: Def,
     @"fn": Fn,
+    macro: Macro,
     expr: Expr,
 };
 
@@ -169,6 +173,25 @@ pub const Fn = struct {
     name: []const u8,
     doc: ?[]const u8,
     lambda: Lambda,
+    is_comptime: bool = false,
+};
+
+/// ["macro", {"name": ..., "params": [...], "rest": ..., "doc": ...}, body...]
+/// Its lambda takes the fixed parameters and then, if there is a "rest"
+/// parameter, one more: the remaining arguments as a data array. Every
+/// parameter and the result are data
+pub const Macro = struct {
+    pos: u32,
+    name: []const u8,
+    doc: ?[]const u8,
+    lambda: Lambda,
+    has_rest: bool,
+
+    /// The number of arguments a call must have at least (exactly, without
+    /// a rest parameter).
+    pub fn fixed(self: Macro) usize {
+        return self.lambda.params.len - @intFromBool(self.has_rest);
+    }
 };
 
 test "type equality" {

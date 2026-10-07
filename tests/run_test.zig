@@ -4,18 +4,23 @@ const ast = @import("ast");
 const analyzer = @import("analyzer");
 const checker = @import("checker");
 const interpreter = @import("interpreter");
+const macros = @import("macros");
 const harness = @import("harness.zig");
 
 const io = std.testing.io;
 
+const Prepared = struct { program: ast.Program, expander: *macros.Expander };
+
 /// Reads, analyzes and checks `src`; reports and returns null on failure.
-fn prepare(alloc: std.mem.Allocator, dir: []const u8, file: harness.File) !?ast.Program {
+fn prepare(alloc: std.mem.Allocator, dir: []const u8, file: harness.File, out: *std.Io.Writer) !?Prepared {
     var diag: reader.Diagnostic = undefined;
     const value = reader.read(file.src, alloc, &diag) catch {
         std.debug.print("FAIL {s}/{s}: syntax error {d}:{d}: {s}\n", .{ dir, file.name, diag.line, diag.column, diag.message });
         return null;
     };
-    const program = analyzer.analyze(file.src, value, alloc, &diag) catch {
+    const expander = try alloc.create(macros.Expander);
+    expander.* = .init(alloc, out);
+    const program = analyzer.analyze(file.src, value, alloc, &diag, expander.options()) catch {
         std.debug.print("FAIL {s}/{s}: {d}:{d}: {s}\n", .{ dir, file.name, diag.line, diag.column, diag.message });
         return null;
     };
@@ -23,7 +28,7 @@ fn prepare(alloc: std.mem.Allocator, dir: []const u8, file: harness.File) !?ast.
         std.debug.print("FAIL {s}/{s}: type error {d}:{d}: {s}\n", .{ dir, file.name, diag.line, diag.column, diag.message });
         return null;
     };
-    return program;
+    return .{ .program = program, .expander = expander };
 }
 
 test "programs print the expected output" {
@@ -33,7 +38,8 @@ test "programs print the expected output" {
 
     var failures: usize = 0;
     for (try harness.juck_files(alloc, "tests/run")) |file| {
-        const program = (try prepare(alloc, "run", file)) orelse {
+        var output: std.Io.Writer.Allocating = .init(alloc);
+        const prepared = (try prepare(alloc, "run", file, &output.writer)) orelse {
             failures += 1;
             continue;
         };
@@ -45,9 +51,11 @@ test "programs print the expected output" {
             continue;
         };
 
-        var output: std.Io.Writer.Allocating = .init(alloc);
         var diag: reader.Diagnostic = undefined;
-        interpreter.run(file.src, program, alloc, &output.writer, &diag, .{}) catch {
+        interpreter.run(file.src, prepared.program, alloc, &output.writer, &diag, .{
+            .gensyms = &prepared.expander.gensyms,
+            .macros = prepared.expander.host(),
+        }) catch {
             std.debug.print("FAIL run/{s}: runtime error {d}:{d}: {s}\n", .{ file.name, diag.line, diag.column, diag.message });
             failures += 1;
             continue;
@@ -67,15 +75,19 @@ test "runtime errors are reported" {
 
     var failures: usize = 0;
     for (try harness.juck_files(alloc, "tests/runtime_errors")) |file| {
-        const program = (try prepare(alloc, "runtime_errors", file)) orelse {
+        var output: std.Io.Writer.Allocating = .init(alloc);
+        const prepared = (try prepare(alloc, "runtime_errors", file, &output.writer)) orelse {
             failures += 1;
             continue;
         };
 
-        var output: std.Io.Writer.Allocating = .init(alloc);
         var diag: reader.Diagnostic = undefined;
         // A low limit keeps the deep-recursion test fast.
-        if (interpreter.run(file.src, program, alloc, &output.writer, &diag, .{ .max_call_depth = 1000 })) |_| {
+        if (interpreter.run(file.src, prepared.program, alloc, &output.writer, &diag, .{
+            .max_call_depth = 1000,
+            .gensyms = &prepared.expander.gensyms,
+            .macros = prepared.expander.host(),
+        })) |_| {
             std.debug.print("FAIL runtime_errors/{s}: ran without errors\n", .{file.name});
             failures += 1;
             continue;

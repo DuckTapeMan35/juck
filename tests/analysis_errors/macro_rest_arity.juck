@@ -1,0 +1,2 @@
+// error: 2:63
+[["macro", {"name": "m", "params": ["a"], "rest": "r"}, "a"], ["m"]]

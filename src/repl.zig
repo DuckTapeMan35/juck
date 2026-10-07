@@ -5,6 +5,9 @@ const ast = @import("ast");
 const analyzer = @import("analyzer");
 const checker = @import("checker");
 const interpreter = @import("interpreter");
+const macros = @import("macros");
+const printer = @import("printer");
+const unparse = @import("unparse");
 
 const Allocator = std.mem.Allocator;
 const Writer = Io.Writer;
@@ -16,12 +19,13 @@ const help =
     \\A definition can be entered again with the same type to replace it.
     \\Commands:
     \\  :help   show this message
+    \\  :expand FORM   show what FORM expands to, without running it
     \\  :quit   leave (or Ctrl-D)
     \\
 ;
 
 /// A file to load before the first prompt.
-pub const File = struct { src: []const u8, program: ast.Program };
+pub const File = struct { src: []const u8, program: reader.Value };
 
 pub fn run(io: Io, alloc: Allocator, out: *Writer, file: ?File) !void {
     var repl: Repl = .{
@@ -29,7 +33,10 @@ pub fn run(io: Io, alloc: Allocator, out: *Writer, file: ?File) !void {
         .out = out,
         .checker = .{ .src = "", .alloc = alloc, .diag = null },
         .interpreter = .{ .alloc = alloc, .out = out },
+        .expander = .init(alloc, out),
     };
+    repl.interpreter.options.gensyms = &repl.expander.gensyms;
+    repl.interpreter.options.macros = repl.expander.host();
 
     if (file) |f| {
         if (!try repl.load(f)) return error.InvalidInput;
@@ -59,6 +66,8 @@ pub fn run(io: Io, alloc: Allocator, out: *Writer, file: ?File) !void {
                 if (eql(trimmed, ":quit") or eql(trimmed, ":q")) break;
                 if (eql(trimmed, ":help") or eql(trimmed, ":h")) {
                     try out.writeAll(help);
+                } else if (std.mem.startsWith(u8, trimmed, ":expand")) {
+                    try repl.show_expansion(try alloc.dupe(u8, trimmed[":expand".len..]));
                 } else {
                     try out.print("unknown command {s}; try :help\n", .{trimmed});
                 }
@@ -83,6 +92,7 @@ const Repl = struct {
     out: *Writer,
     checker: checker.Session,
     interpreter: interpreter.Session,
+    expander: macros.Expander,
 
     /// Everything entered so far, one entry after another. Positions in
     /// the AST are offsets into this text, so errors can be traced back to
@@ -96,12 +106,17 @@ const Repl = struct {
     fn load(self: *Repl, f: File) !bool {
         _ = try self.add_entry(f.src);
         var diag: reader.Diagnostic = undefined;
-        self.checker.check_program(self.text.items, f.program, &diag) catch |err| {
+        const program = analyzer.analyze(self.text.items, f.program, self.alloc, &diag, self.expander.options()) catch |err| {
+            if (err != error.AnalysisFailed) return err;
+            try self.report(diag);
+            return false;
+        };
+        self.checker.check_program(self.text.items, program, &diag) catch |err| {
             if (err != error.TypeError) return err;
             try self.report(diag);
             return false;
         };
-        self.interpreter.run_program(self.text.items, f.program, &diag) catch |err| {
+        self.interpreter.run_program(self.text.items, program, &diag) catch |err| {
             if (err != error.RuntimeError) return err;
             try self.report(diag);
             return false;
@@ -129,7 +144,7 @@ const Repl = struct {
         };
 
         const item = try self.alloc.create(ast.TopLevel);
-        item.* = analyzer.analyze_form(self.text.items, value, self.alloc, &diag) catch |err| {
+        item.* = analyzer.analyze_form(self.text.items, value, self.alloc, &diag, self.expander.options()) catch |err| {
             if (err != error.AnalysisFailed) return err;
             return self.report(diag);
         };
@@ -139,6 +154,7 @@ const Repl = struct {
         const name: ?[]const u8 = switch (item.*) {
             .def => |d| d.name,
             .@"fn" => |f| f.name,
+            .macro => |m| m.name,
             .expr => null,
         };
         const previous = if (name) |n| self.checker.globals.get(n) else null;
@@ -160,6 +176,23 @@ const Repl = struct {
         if (ty == .null) return;
         if (ty == .@"fn") return self.out.print("<function {f}>\n", .{ty});
         try interpreter.write_value(self.out, v);
+        try self.out.writeByte('\n');
+    }
+
+    /// :expand FORM: analyzes FORM, expanding macros, and shows the
+    /// result as code, without checking or running it.
+    fn show_expansion(self: *Repl, entry: []const u8) !void {
+        const offset = try self.add_entry(entry);
+        var diag: reader.Diagnostic = undefined;
+        const value = reader.read_at(entry, offset, self.alloc, &diag) catch |err| {
+            if (err != error.InvalidInput) return err;
+            return self.out.print("error at {d}:{d}: {s}\n", .{ diag.line, diag.column, diag.message });
+        };
+        const item = analyzer.analyze_form(self.text.items, value, self.alloc, &diag, self.expander.options()) catch |err| {
+            if (err != error.AnalysisFailed) return err;
+            return self.report(diag);
+        };
+        try printer.write_json_value(self.out, try unparse.top_level(self.alloc, item));
         try self.out.writeByte('\n');
     }
 

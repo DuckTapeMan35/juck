@@ -1,0 +1,58 @@
+// Macros: functions from code to code, expanded before the program runs.
+[
+  // and/or as macros: short-circuiting falls out of `if`.
+  ["macro", {"name": "and", "params": ["a", "b"]},
+    ["template", ["if", ["insert", "a"], ["insert", "b"], false]]],
+  ["macro", {"name": "or", "params": ["a", "b"]},
+    ["template", ["if", ["insert", "a"], true, ["insert", "b"]]]],
+  ["print", ["and", true, ["<", 1, 2]]],
+  ["print", ["and", false, ["=", ["/", 1, 0], 0]]],
+  ["print", ["or", true, ["=", ["/", 1, 0], 0]]],
+
+  ["macro", {"name": "unless", "params": ["cond", "then", "else"]},
+    ["template", ["if", ["not", ["insert", "cond"]], ["insert", "then"], ["insert", "else"]]]],
+  ["print", ["unless", false, {"str": "yes"}, {"str": "no"}]],
+
+  // A rest parameter collects the remaining arguments.
+  ["macro", {"name": "when", "params": ["cond"], "rest": "body"},
+    ["template", ["if", ["insert", "cond"], ["do", ["splice", "body"]], null]]],
+  ["when", true, ["print", 1], ["print", 2]],
+
+  // A recursive macro: each expansion contains a smaller `cond`.
+  ["macro", {"name": "cond", "params": ["first"], "rest": "more"},
+    ["if", ["=", ["data-len", "more"], 0],
+      "first",
+      ["template", ["if", ["insert", "first"], ["insert", ["data-get", "more", 0]],
+        ["cond", ["splice", ["data-slice", "more", 1, ["data-len", "more"]]]]]]]],
+  ["fn", {"name": "sign", "params": [["n", "i64"]], "returns": "str"},
+    ["cond",
+      ["<", "n", 0], {"str": "negative"},
+      ["=", "n", 0], {"str": "zero"},
+      {"str": "positive"}]],
+  ["print", ["sign", -5]],
+  ["print", ["sign", 0]],
+  ["print", ["sign", 7]],
+
+  // Hygiene: v# becomes a fresh name, so it can't clash with the caller's v.
+  ["macro", {"name": "print-twice", "params": ["e"]},
+    ["template", ["let", [["v#", "i64", ["insert", "e"]]], ["print", "v#"], ["print", "v#"]]]],
+  ["let", [["v", "i64", 21]], ["print-twice", ["*", "v", 2]]],
+
+  // A macro can expand to a definition.
+  ["macro", {"name": "defconst", "params": ["name", "value"]},
+    ["template", ["def", {"name": ["insert", "name"], "type": "i64"}, ["insert", "value"]]]],
+  ["defconst", "answer", 42],
+  ["print", "answer"],
+
+  // Macro bodies can use local lambdas as helpers, and run at compile
+  // time: this print happens before the program starts.
+  ["macro", {"name": "square", "params": ["e"]},
+    ["let", [["mul", {"fn": {"params": ["data", "data"], "returns": "data"}},
+               ["lambda", {"params": [["a", "data"], ["b", "data"]], "returns": "data"},
+                 ["template", ["*", ["insert", "a"], ["insert", "b"]]]]]],
+      ["print", {"str": "expanding square"}],
+      ["mul", "e", "e"]]],
+  ["print", ["square", 9]],
+
+  ["print", ["data-symbol?", ["gensym", {"str": "x"}]]],
+]

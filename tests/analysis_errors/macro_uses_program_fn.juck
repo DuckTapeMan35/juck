@@ -1,0 +1,2 @@
+// error: 2:116
+[["fn", {"name": "helper", "params": [], "returns": "data"}, ["data", 1]], ["macro", {"name": "m", "params": []}, ["helper"]]]
