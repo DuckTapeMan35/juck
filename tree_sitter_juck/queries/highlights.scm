@@ -16,7 +16,8 @@
 (array . (string) @function.call)
 
 ; ...a built-in...
-(#any-of? @_head "+" "-" "*" "/" "%" "<" "<=" ">" ">=" "=" "!=" "not" "print"
+((array . (string (string_content) @_head) @function.builtin)
+  (#any-of? @_head "+" "-" "*" "/" "%" "<" "<=" ">" ">=" "=" "!=" "not" "print"
     "to-data" "symbol" "gensym" "eval"))
 ((array . (string (string_content) @_head) @function.builtin)
   (#match? @_head "^data-"))
