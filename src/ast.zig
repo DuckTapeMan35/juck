@@ -11,11 +11,13 @@ pub const Type = union(enum) {
     /// Any juck code as a value (what data forms produce).
     data,
     @"fn": *const FnType,
+    list: *const Type,
 
     pub fn eql(a: Type, b: Type) bool {
         if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
         return switch (a) {
             .@"fn" => |fa| fa.eql(b.@"fn".*),
+            .list => |la| la.eql(b.list.*),
             else => true,
         };
     }
@@ -31,6 +33,7 @@ pub const Type = union(enum) {
                 }
                 try w.print("], \"returns\": {f}}}}}", .{f.returns});
             },
+            .list => |t| try w.print("{{\"list\": {f}}}", .{t.*}),
             else => try w.print("\"{s}\"", .{@tagName(self)}),
         }
     }
@@ -220,4 +223,16 @@ test "type equality" {
     try std.testing.expectEqualStrings(
         \\{"fn": {"params": ["i64", "f64"], "returns": "i64"}}
     , w.buffered());
+    const i64_type: Type = .i64;
+    const f64_type: Type = .f64;
+    const ints: Type = .{ .list = &i64_type };
+    try std.testing.expect(ints.eql(.{ .list = &i64_type }));
+    try std.testing.expect(!ints.eql(.{ .list = &f64_type }));
+    try std.testing.expect(!ints.eql(.i64));
+
+    var w2: std.Io.Writer = .fixed(&buf);
+    try w2.print("{f}", .{ints});
+    try std.testing.expectEqualStrings(
+        \\{"list": "i64"}
+    , w2.buffered());
 }

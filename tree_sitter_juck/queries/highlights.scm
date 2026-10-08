@@ -18,9 +18,12 @@
 ; ...a built-in...
 ((array . (string (string_content) @_head) @function.builtin)
   (#any-of? @_head "+" "-" "*" "/" "%" "<" "<=" ">" ">=" "=" "!=" "not" "print"
-    "to-data" "symbol" "gensym" "eval"))
+    "to-data" "symbol" "gensym" "eval"
+    "i64-to-f64" "f64-to-i64" "i64-to-str" "f64-to-str"))
 ((array . (string (string_content) @_head) @function.builtin)
   (#match? @_head "^data-"))
+((array . (string (string_content) @_head) @function.builtin)
+  (#match? @_head "^str-"))
 
 ; ...or a special form.
 ((array . (string (string_content) @_head) @keyword)

@@ -9,12 +9,13 @@ const modules = @import("modules");
 const stdlib = @import("stdlib");
 
 const usage =
-    \\usage: juck [<file>] [--repl | --check | --tokens | --ast | --json]
+    \\usage: juck [<file>] [--repl | --check | --expand | --tokens | --ast | --json]
     \\
     \\  (no file)  start the REPL
     \\  (no flag)  run the program
     \\  --repl     run the program, then start the REPL with its definitions
-    \\  --check    check the program for errors without running it
+    \\  --check    check the program for er\\  --expand   print the program after macro expansion, as strict JSONrors without running it
+    \\  --expand   print the program after macro expansion, as strict JSON
     \\  --tokens   print the lexer's tokens
     \\  --ast      print the syntax tree
     \\  --json     print the program as strict JSON
@@ -38,6 +39,8 @@ fn main_impl(init: std.process.Init) !void {
             mode = .repl;
         } else if (std.mem.eql(u8, arg, "--check")) {
             mode = .check;
+        } else if (std.mem.eql(u8, arg, "--expand")) {
+            mode = .expand;
         } else if (std.mem.eql(u8, arg, "--tokens")) {
             mode = .tokens;
         } else if (std.mem.eql(u8, arg, "--ast")) {

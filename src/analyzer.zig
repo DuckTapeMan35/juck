@@ -605,11 +605,20 @@ const Analyzer = struct {
                 if (pairs.len != 1) return self.fail(v.pos, "a type object must have exactly one key, like {{\"fn\": ...}}", .{});
                 const key = pairs[0].key.data.string;
                 if (eql(key, "fn")) return .{ .@"fn" = try self.fn_type(pairs[0].value) };
+                if (eql(key, "list")) {
+                    const element = try self.alloc.create(ast.Type);
+                    element.* = try self.type_expr(pairs[0].value);
+                    return .{ .list = element };
+                }
                 if (eql(key, "struct") or eql(key, "union"))
                     return self.fail(pairs[0].key.pos, "{s} types are not supported yet", .{key});
                 return self.fail(pairs[0].key.pos, "unknown type kind \"{s}\"", .{key});
             },
-            else => return self.fail(v.pos, "expected a type: a name like \"i64\" or an object like {{\"fn\": ...}}", .{}),
+            else => return self.fail(
+                v.pos,
+                "expected a type: a name like \"i64\" or an object like {{\"fn\": ...}} or {{\"list\": ...}}",
+                .{},
+            ),
         }
     }
 

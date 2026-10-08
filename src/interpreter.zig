@@ -320,6 +320,52 @@ pub const Session = struct {
                 return .null;
             },
 
+            .@"i64-to-f64" => .{ .float = @floatFromInt(vals[0].int) },
+            .@"f64-to-i64" => {
+                const x = vals[0].float;
+                // The i64 range as f64: -2^63 is exact, 2^63 is just past the end.
+                if (std.math.isNan(x) or x < -9223372036854775808.0 or x >= 9223372036854775808.0)
+                    return self.fail(pos, "{d} does not fit in i64", .{x});
+                return .{ .int = @intFromFloat(@trunc(x)) };
+            },
+            .@"i64-to-str" => .{ .str = try std.fmt.allocPrint(self.alloc, "{d}", .{vals[0].int}) },
+            .@"f64-to-str" => blk: {
+                var w: Writer.Allocating = .init(self.alloc);
+                try printer.write_json_float(&w.writer, vals[0].float);
+                break :blk .{ .str = w.written() };
+            },
+            .@"str-len" => .{ .int = @intCast(vals[0].str.len) },
+            .@"str-concat" => .{ .str = try std.mem.concat(self.alloc, u8, &.{ vals[0].str, vals[1].str }) },
+            .@"str-slice" => {
+                const s = vals[0].str;
+                const start = vals[1].int;
+                const end = vals[2].int;
+                if (start < 0 or end < start or end > s.len)
+                    return self.fail(pos, "slice {d}..{d} is out of bounds for a string of {d} bytes", .{ start, end, s.len });
+                const a: usize = @intCast(start);
+                const z: usize = @intCast(end);
+                // Neither end may fall inside a UTF-8 character, so the byte
+                // at each end (if there is one) can't be a continuation byte.
+                if ((a < s.len and is_continuation(s[a])) or (z < s.len and is_continuation(s[z])))
+                    return self.fail(pos, "slice {d}..{d} splits a UTF-8 character", .{ start, end });
+                return .{ .str = s[a..z] };
+            },
+            .@"str-byte" => {
+                const s = vals[0].str;
+                const i = vals[1].int;
+                if (i < 0 or i >= s.len)
+                    return self.fail(pos, "index {d} is out of bounds for a string of {d} bytes", .{ i, s.len });
+                return .{ .int = s[@intCast(i)] };
+            },
+            .@"str-from-byte" => {
+                const byte = vals[0].int;
+                // Only ASCII: a single byte from 128 up isn't valid UTF-8 by itself.
+                if (byte < 0 or byte > 127)
+                    return self.fail(pos, "{d} is not an ASCII code (0 to 127)", .{byte});
+                const s = try self.alloc.alloc(u8, 1);
+                s[0] = @intCast(byte);
+                return .{ .str = s };
+            },
             .@"data-null?" => .{ .bool = vals[0].data.data == .null },
             .@"data-bool?" => .{ .bool = vals[0].data.data == .bool },
             .@"data-int?" => .{ .bool = vals[0].data.data == .int },
@@ -558,6 +604,11 @@ pub fn write_value(out: *Writer, v: Value) Writer.Error!void {
         .data => |d| try printer.write_json_value(out, d),
         .func => unreachable,
     }
+}
+
+/// A UTF-8 continuation byte: the second, third or fourth byte of a character.
+fn is_continuation(byte: u8) bool {
+    return byte & 0b1100_0000 == 0b1000_0000;
 }
 
 /// The type of a runtime value.

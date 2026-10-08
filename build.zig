@@ -199,7 +199,7 @@ pub fn build(b: *std.Build) void {
 
     // The standard library, embedded in the binary: std/NAME.juck is the
     // module "std/NAME". Add new modules to this list.
-    const std_modules = [_][]const u8{"logic"};
+    const std_modules = [_][]const u8{ "logic", "math", "str" };
     const stdlib_files = b.addWriteFiles();
     var stdlib_src: std.ArrayList(u8) = .empty;
     stdlib_src.appendSlice(

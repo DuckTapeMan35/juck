@@ -37,6 +37,7 @@ pub const Session = struct {
     sources: *const reader.Sources,
     alloc: Allocator,
     diag: ?*Diagnostic,
+    scope: ?analyzer.Scope = null,
 
     globals: std.StringHashMapUnmanaged(Global) = .empty,
     /// Locals in scope, innermost last. Scopes are restored by truncating
@@ -259,7 +260,9 @@ pub const Session = struct {
     fn bind_local(self: *Session, pos: u32, name: []const u8, t: Type) Error!void {
         if (Builtin.lookup(name) != null)
             return self.fail(pos, "\"{s}\" is a built-in; choose another name", .{name});
-        if (self.globals.contains(name))
+        // The name a global with this name would have in this module.
+        const global = if (self.scope) |s| try s.vtable.define(s.ctx, pos, name) else name;
+        if (self.globals.contains(global))
             return self.fail(pos, "\"{s}\" is already a global name; choose another name", .{name});
         for (self.locals.items) |l| {
             if (std.mem.eql(u8, l.name, name))
@@ -354,7 +357,42 @@ pub const Session = struct {
                     return self.fail(args[0].pos, "\"print\" can only print i64, f64, bool, str, null and data values, but this is {f}", .{t});
                 return .null;
             },
-
+            .@"i64-to-f64" => {
+                try self.expect_args(b, args, &.{.i64});
+                return .f64;
+            },
+            .@"f64-to-i64" => {
+                try self.expect_args(b, args, &.{.f64});
+                return .i64;
+            },
+            .@"i64-to-str" => {
+                try self.expect_args(b, args, &.{.i64});
+                return .str;
+            },
+            .@"f64-to-str" => {
+                try self.expect_args(b, args, &.{.f64});
+                return .str;
+            },
+            .@"str-len" => {
+                try self.expect_args(b, args, &.{.str});
+                return .i64;
+            },
+            .@"str-concat" => {
+                try self.expect_args(b, args, &.{ .str, .str });
+                return .str;
+            },
+            .@"str-slice" => {
+                try self.expect_args(b, args, &.{ .str, .i64, .i64 });
+                return .str;
+            },
+            .@"str-byte" => {
+                try self.expect_args(b, args, &.{ .str, .i64 });
+                return .i64;
+            },
+            .@"str-from-byte" => {
+                try self.expect_args(b, args, &.{.i64});
+                return .str;
+            },
             // data -> bool
             .@"data-null?", .@"data-bool?", .@"data-int?", .@"data-float?", .@"data-symbol?", .@"data-array?", .@"data-object?" => {
                 try self.expect_args(b, args, &.{.data});

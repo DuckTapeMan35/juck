@@ -1,0 +1,114 @@
+[
+  ["import", "logic", "std/logic"],
+
+  //the built-ins, under shorter names
+  ["fn", {"name": "len", "params": [["s", "str"]], "returns": "i64", "pub": true,
+          "doc": "The length of s in bytes."},
+    ["str-len", "s"]],
+
+  ["fn", {"name": "concat", "params": [["a", "str"], ["b", "str"]], "returns": "str", "pub": true},
+    ["str-concat", "a", "b"]],
+
+  ["fn", {"name": "slice", "params": [["s", "str"], ["start", "i64"], ["end", "i64"]], "returns": "str", "pub": true,
+          "doc": "The bytes of s from start up to (not including) end."},
+    ["str-slice", "s", "start", "end"]],
+
+  ["fn", {"name": "byte", "params": [["s", "str"], ["i", "i64"]], "returns": "i64", "pub": true,
+          "doc": "The byte at position i, from 0 to 255."},
+    ["str-byte", "s", "i"]],
+
+  // searching
+
+  ["fn", {"name": "matches-at?", "params": [["s", "str"], ["part", "str"], ["at", "i64"]], "returns": "bool", "pub": true,
+          "doc": "Whether part appears in s at byte position at."},
+    ["logic.and",
+      ["logic.and", [">=", "at", 0], ["<=", ["+", "at", ["str-len", "part"]], ["str-len", "s"]]],
+      ["same-bytes?", "s", "part", "at", 0]]],
+
+  // Whether the bytes of part from i on equal those of s from at + i on.
+  // Compares bytes rather than slicing s, since a slice of s could split
+  // a character where part doesn't match.
+  ["fn", {"name": "same-bytes?", "params": [["s", "str"], ["part", "str"], ["at", "i64"], ["i", "i64"]], "returns": "bool"},
+    ["logic.or",
+      ["=", "i", ["str-len", "part"]],
+      ["logic.and",
+        ["=", ["str-byte", "s", ["+", "at", "i"]], ["str-byte", "part", "i"]],
+        ["same-bytes?", "s", "part", "at", ["+", "i", 1]]]]],
+
+  ["fn", {"name": "starts-with?", "params": [["s", "str"], ["prefix", "str"]], "returns": "bool", "pub": true},
+    ["matches-at?", "s", "prefix", 0]],
+
+  ["fn", {"name": "ends-with?", "params": [["s", "str"], ["suffix", "str"]], "returns": "bool", "pub": true},
+    ["matches-at?", "s", "suffix", ["-", ["str-len", "s"], ["str-len", "suffix"]]]],
+
+  ["fn", {"name": "index-of-from", "params": [["s", "str"], ["part", "str"], ["from", "i64"]], "returns": "i64", "pub": true,
+          "doc": "The first position, from byte position from on, where part appears in s, or -1."},
+    ["if", [">", ["+", "from", ["str-len", "part"]], ["str-len", "s"]],
+      -1,
+      ["if", ["matches-at?", "s", "part", "from"],
+        "from",
+        ["index-of-from", "s", "part", ["+", "from", 1]]]]],
+
+  ["fn", {"name": "index-of", "params": [["s", "str"], ["part", "str"]], "returns": "i64", "pub": true,
+          "doc": "The first position where part appears in s, or -1."},
+    ["index-of-from", "s", "part", 0]],
+
+  ["fn", {"name": "contains?", "params": [["s", "str"], ["part", "str"]], "returns": "bool", "pub": true},
+    [">=", ["index-of", "s", "part"], 0]],
+
+  // building
+  ["fn", {"name": "repeat", "params": [["s", "str"], ["n", "i64"]], "returns": "str", "pub": true,
+          "doc": "s, n times over. Empty if n is 0 or less."},
+    ["if", ["<=", "n", 0],
+      {"str": ""},
+      ["str-concat", "s", ["repeat", "s", ["-", "n", 1]]]]],
+
+  // whitespace
+  ["fn", {"name": "space-byte?", "params": [["b", "i64"]], "returns": "bool", "pub": true,
+          "doc": "Whether b is an ASCII space, tab, newline or carriage return."},
+    ["logic.or", ["logic.or", ["=", "b", 32], ["=", "b", 9]],
+                 ["logic.or", ["=", "b", 10], ["=", "b", 13]]]],
+
+  // The first position from i on that isn't whitespace.
+  ["fn", {"name": "skip-spaces", "params": [["s", "str"], ["i", "i64"]], "returns": "i64"},
+    ["if", ["logic.and", ["<", "i", ["str-len", "s"]], ["space-byte?", ["str-byte", "s", "i"]]],
+      ["skip-spaces", "s", ["+", "i", 1]],
+      "i"]],
+
+  // The end of s once trailing whitespace before position i is dropped.
+  ["fn", {"name": "skip-spaces-back", "params": [["s", "str"], ["i", "i64"]], "returns": "i64"},
+    ["if", ["logic.and", [">", "i", 0], ["space-byte?", ["str-byte", "s", ["-", "i", 1]]]],
+      ["skip-spaces-back", "s", ["-", "i", 1]],
+      "i"]],
+
+  ["fn", {"name": "trim-start", "params": [["s", "str"]], "returns": "str", "pub": true},
+    ["str-slice", "s", ["skip-spaces", "s", 0], ["str-len", "s"]]],
+
+  ["fn", {"name": "trim-end", "params": [["s", "str"]], "returns": "str", "pub": true},
+    ["str-slice", "s", 0, ["skip-spaces-back", "s", ["str-len", "s"]]]],
+
+  ["fn", {"name": "trim", "params": [["s", "str"]], "returns": "str", "pub": true,
+          "doc": "s without whitespace at either end."},
+    ["trim-end", ["trim-start", "s"]]],
+
+  // Copies s, adding shift to every byte from lo to hi. start is where the
+  // part not copied yet begins; i is the byte being looked at. Both are
+  // always at the start of a character, so slicing there is safe.
+  ["fn", {"name": "shift-bytes", "params": [["s", "str"], ["start", "i64"], ["i", "i64"], ["lo", "i64"], ["hi", "i64"], ["shift", "i64"]], "returns": "str"},
+    ["if", ["=", "i", ["str-len", "s"]],
+      ["str-slice", "s", "start", "i"],
+      ["let", [["c", "i64", ["str-byte", "s", "i"]]],
+        ["if", ["logic.and", [">=", "c", "lo"], ["<=", "c", "hi"]],
+          ["str-concat",
+            ["str-concat", ["str-slice", "s", "start", "i"], ["str-from-byte", ["+", "c", "shift"]]],
+            ["shift-bytes", "s", ["+", "i", 1], ["+", "i", 1], "lo", "hi", "shift"]],
+          ["shift-bytes", "s", "start", ["+", "i", 1], "lo", "hi", "shift"]]]]],
+
+  ["fn", {"name": "upper", "params": [["s", "str"]], "returns": "str", "pub": true,
+          "doc": "s with ASCII letters in upper case."},
+    ["shift-bytes", "s", 0, 0, 97, 122, -32]],
+
+  ["fn", {"name": "lower", "params": [["s", "str"]], "returns": "str", "pub": true,
+          "doc": "s with ASCII letters in lower case."},
+    ["shift-bytes", "s", 0, 0, 65, 90, 32]],
+]

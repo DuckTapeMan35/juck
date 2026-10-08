@@ -1,0 +1,89 @@
+// std/math: integer and float helpers, written in juck.
+[
+  ["def", {"name": "pi", "type": "f64", "pub": true}, 3.141592653589793],
+  ["def", {"name": "e", "type": "f64", "pub": true}, 2.718281828459045],
+
+  // i64
+  ["fn", {"name": "abs", "params": [["x", "i64"]], "returns": "i64", "pub": true,
+          "doc": "The absolute value of x. The smallest i64 has none, so it overflows."},
+    ["if", ["<", "x", 0], ["-", 0, "x"], "x"]],
+
+  ["fn", {"name": "sign", "params": [["x", "i64"]], "returns": "i64", "pub": true,
+          "doc": "-1, 0 or 1, depending on whether x is negative, zero or positive."},
+    ["if", ["<", "x", 0], -1, ["if", [">", "x", 0], 1, 0]]],
+
+  ["fn", {"name": "min", "params": [["a", "i64"], ["b", "i64"]], "returns": "i64", "pub": true},
+    ["if", ["<", "a", "b"], "a", "b"]],
+
+  ["fn", {"name": "max", "params": [["a", "i64"], ["b", "i64"]], "returns": "i64", "pub": true},
+    ["if", [">", "a", "b"], "a", "b"]],
+
+  ["fn", {"name": "clamp", "params": [["x", "i64"], ["lo", "i64"], ["hi", "i64"]], "returns": "i64", "pub": true,
+          "doc": "x, moved into the range lo to hi (inclusive)."},
+    ["min", ["max", "x", "lo"], "hi"]],
+
+  ["fn", {"name": "even?", "params": [["x", "i64"]], "returns": "bool", "pub": true},
+    ["=", ["%", "x", 2], 0]],
+
+  ["fn", {"name": "odd?", "params": [["x", "i64"]], "returns": "bool", "pub": true},
+    ["!=", ["%", "x", 2], 0]],
+
+  ["fn", {"name": "pow", "params": [["base", "i64"], ["exp", "i64"]], "returns": "i64", "pub": true,
+          "doc": "base to the power exp. A negative exp gives what 1 / base^-exp gives in i64 division: 0, unless base is 1 or -1, and a division by zero if base is 0."},
+    ["if", ["<", "exp", 0],
+      ["pow-negative", "base", "exp"],
+      ["pow-loop", "base", "exp", 1]]],
+
+  // Exponentiation by squaring: acc * b^n is the result all along. b is
+  // only squared when it will be used, so it can't overflow needlessly.
+  ["fn", {"name": "pow-loop", "params": [["b", "i64"], ["n", "i64"], ["acc", "i64"]], "returns": "i64"},
+    ["if", ["=", "n", 0],
+      "acc",
+      ["pow-loop",
+        ["if", ["=", "n", 1], "b", ["*", "b", "b"]],
+        ["/", "n", 2],
+        ["if", ["odd?", "n"], ["*", "acc", "b"], "acc"]]]],
+
+  ["fn", {"name": "pow-negative", "params": [["b", "i64"], ["n", "i64"]], "returns": "i64"},
+    ["if", ["=", "b", 0], ["/", 1, 0],
+      ["if", ["=", "b", 1], 1,
+        ["if", ["=", "b", -1], ["if", ["odd?", "n"], -1, 1],
+          0]]]],
+
+  // f64
+
+  ["fn", {"name": "abs-f", "params": [["x", "f64"]], "returns": "f64", "pub": true},
+    ["if", ["<", "x", 0.0], ["-", 0.0, "x"], "x"]],
+
+  ["fn", {"name": "min-f", "params": [["a", "f64"], ["b", "f64"]], "returns": "f64", "pub": true},
+    ["if", ["<", "a", "b"], "a", "b"]],
+
+  ["fn", {"name": "max-f", "params": [["a", "f64"], ["b", "f64"]], "returns": "f64", "pub": true},
+    ["if", [">", "a", "b"], "a", "b"]],
+
+  // From 2^52 up, every f64 is a whole number, and f64-to-i64 would
+  // fail from 2^63 up. So only smaller numbers need rounding; anything
+  // else (including infinities and NaN) is returned as it is.
+  ["fn", {"name": "trunc", "params": [["x", "f64"]], "returns": "f64", "pub": true,
+          "doc": "x rounded toward zero."},
+    ["if", ["<", ["abs-f", "x"], 4503599627370496.0],
+      ["i64-to-f64", ["f64-to-i64", "x"]],
+      "x"]],
+
+  ["fn", {"name": "floor", "params": [["x", "f64"]], "returns": "f64", "pub": true,
+          "doc": "The largest whole number not above x."},
+    ["let", [["t", "f64", ["trunc", "x"]]],
+      ["if", [">", "t", "x"], ["-", "t", 1.0], "t"]]],
+
+  ["fn", {"name": "ceil", "params": [["x", "f64"]], "returns": "f64", "pub": true,
+          "doc": "The smallest whole number not below x."},
+    ["let", [["t", "f64", ["trunc", "x"]]],
+      ["if", ["<", "t", "x"], ["+", "t", 1.0], "t"]]],
+
+  ["fn", {"name": "round", "params": [["x", "f64"]], "returns": "f64", "pub": true,
+          "doc": "x rounded to the nearest whole number, halfway cases away from zero."},
+    ["let", [["t", "f64", ["trunc", "x"]]],
+      ["if", [">=", ["abs-f", ["-", "x", "t"]], 0.5],
+        ["if", ["<", "x", 0.0], ["-", "t", 1.0], ["+", "t", 1.0]],
+        "t"]]],
+]

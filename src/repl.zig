@@ -113,7 +113,7 @@ const Repl = struct {
         };
 
         p.import_into_root(value) catch |err| switch (err) {
-            error.ImportFailed, error.SyntaxError, error.AnalysisFailed => return self.report(name),
+            error.ImportFailed, error.SyntaxError, error.AnalysisFailed, error.TypeError, error.RuntimeError => return self.report(name),
             else => return err,
         };
 

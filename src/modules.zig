@@ -61,6 +61,7 @@ pub const Program = struct {
         self.interpreter.options.gensyms = &self.expander.gensyms;
         self.interpreter.options.macros = self.expander.host();
         self.interpreter.options.scope = self.scope();
+        self.checker.scope = self.scope();
         // eval inside a macro body resolves names the same way.
         self.expander.interpreter.options.scope = self.scope();
         return self;
@@ -98,9 +99,67 @@ pub const Program = struct {
         return self.sources.add(self.alloc, name, text, self.root.?);
     }
 
-    /// For a REPL input that is an import: loads the module into the root.
-    pub fn import_into_root(self: *Program, form: Value) LoadError!void {
-        if (is_import(form)) try self.import(self.root.?, form);
+    /// For a REPL input that is an import: loads the module into the root,
+    /// then checks and runs the modules this import loaded. (A program from
+    /// a file does those two steps for all modules at once, in check and
+    /// run) If anything fails, the import is undone, so it can be tried
+    /// again
+    pub fn import_into_root(self: *Program, form: Value) !void {
+        if (!is_import(form)) return;
+        const root = self.root.?;
+        const items = form.data.array;
+        const alias: ?[]const u8 = if (items.len == 3 and items[1].data == .string) items[1].data.string else null;
+        // If the name is already imported, the import fails with "already
+        // imported", and the earlier import must stay.
+        const had_alias = if (alias) |a| root.imports.contains(a) else true;
+        const first_new = self.order.items.len;
+
+        errdefer {
+            if (!had_alias) _ = root.imports.remove(alias.?);
+            self.forget_modules_since(first_new);
+        }
+
+        try self.import(root, form);
+        const loaded = self.order.items[first_new..];
+        for (loaded) |m| try self.checker.check_program(&self.sources, m.program, &self.diag);
+        for (loaded) |m| try self.interpreter.run_program(&self.sources, m.program, &self.diag);
+    }
+
+    /// Forgets every module loaded after the first first_new in order,
+    /// including ones whose loading failed before they got there. Their
+    /// definitions may stay in the checker and interpreter, but without
+    /// the module nothing can refer to them, and loading the module again
+    /// redefines them.
+    fn forget_modules_since(self: *Program, first_new: usize) void {
+        self.order.shrinkRetainingCapacity(first_new);
+        // The modules that existed before are the root and those in `order`.
+        // Removing invalidates the iterator, so start over after each one.
+        outer: while (true) {
+            var it = self.modules.iterator();
+            while (it.next()) |e| {
+                const m = e.value_ptr.*;
+                if (m == self.root.? or std.mem.indexOfScalar(*Module, self.order.items, m) != null) continue;
+                forget_globals(&self.checker.globals, m.prefix);
+                forget_globals(&self.interpreter.globals, m.prefix);
+                _ = self.modules.remove(e.key_ptr.*);
+                continue :outer;
+            }
+            break;
+        }
+    }
+
+    fn forget_globals(map: anytype, prefix: []const u8) void {
+        outer: while (true) {
+            var it = map.iterator();
+            while (it.next()) |e| {
+                const name = e.key_ptr.*;
+                if (!std.mem.startsWith(u8, name, prefix)) continue;
+                if (std.mem.indexOfScalar(u8, name[prefix.len..], '.') != null) continue;
+                _ = map.remove(name);
+                continue :outer;
+            }
+            break;
+        }
     }
 
     fn new_module(self: *Program, path: []const u8, prefix: []const u8) !*Module {

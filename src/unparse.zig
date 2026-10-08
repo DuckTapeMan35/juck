@@ -163,6 +163,7 @@ fn type_value(alloc: Allocator, t: ast.Type) Allocator.Error!Value {
                 .{ "returns", try type_value(alloc, f.returns) },
             }) }});
         },
+        .list => |element| object(alloc, &.{.{ "list", try type_value(alloc, element.*) }}),
         else => sym(@tagName(t)),
     };
 }

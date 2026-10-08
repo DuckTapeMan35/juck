@@ -1,0 +1,3 @@
+// error: 3:13
+[["fn", {"name": "f", "params": [["xs", {"list": "i64"}]], "returns": "null"}, null],
+ ["let", [["g", {"fn": {"params": [{"list": "f64"}], "returns": "null"}}, "f"]], null]]
